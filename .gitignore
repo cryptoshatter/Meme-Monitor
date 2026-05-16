@@ -1,0 +1,45 @@
+# Local secrets and user data
+.env
+.env.*
+!.env.example
+data/
+*.log
+*.key
+*.pem
+credentials.json
+config.json
+config.json.bak
+wallet_activity_history.json
+
+# Python / build cache
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+.venv/
+venv/
+env/
+build/
+dist/
+installer_build/
+*.egg-info/
+
+# Tooling and temporary generated files
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.tmp
+*.bak
+
+# Local vendored references not required to run/build this app
+package/
+gmgn-cli-*.tgz
+
+# Keep the public installer package separate from local build output
+!release/
+!release/README.md
+!release/*.exe
