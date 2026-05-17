@@ -14,6 +14,7 @@ DEFAULT_HOST = "https://openapi.gmgn.ai"
 DEFAULT_CHAIN = "sol"
 DEFAULT_ADDRESS = "So11111111111111111111111111111111111111112"
 DEFAULT_WALLET_AVATAR = "\U0001f9e9"
+AVAILABLE_SKINS = {"default", "okx", "binance", "gmgn", "claude"}
 
 
 def app_data_dir() -> Path:
@@ -97,6 +98,11 @@ class AppConfig:
     wallet_avatar_value: str = DEFAULT_WALLET_AVATAR
     wallets: list[dict[str, Any]] | None = None
     tokens: list[dict[str, Any]] | None = None
+    skin: str = "default"
+    portfolio_wallet_address: str = ""
+    portfolio_evm_wallet_address: str = ""
+    portfolio_sol_wallet_address: str = ""
+    portfolio_holdings_cache: list[dict[str, Any]] | None = None
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -137,6 +143,7 @@ class AppConfig:
         cfg.chain = str(cfg.chain).lower().strip() or DEFAULT_CHAIN
         cfg.address = str(cfg.address).strip() or DEFAULT_ADDRESS
         cfg.api_host = str(cfg.api_host).rstrip("/") or DEFAULT_HOST
+        cfg.skin = normalize_skin_name(cfg.skin)
         cfg.wallet_remark = str(cfg.wallet_remark or "").strip()
         if looks_mojibake(cfg.wallet_remark):
             cfg.wallet_remark = "Wallet"
@@ -149,6 +156,15 @@ class AppConfig:
         if not cfg.wallet_avatar_value:
             cfg.wallet_avatar_kind = "emoji"
             cfg.wallet_avatar_value = DEFAULT_WALLET_AVATAR
+        cfg.portfolio_wallet_address = normalize_plain_wallet_address(cfg.portfolio_wallet_address)
+        cfg.portfolio_evm_wallet_address = normalize_plain_wallet_address(cfg.portfolio_evm_wallet_address)
+        cfg.portfolio_sol_wallet_address = normalize_plain_wallet_address(cfg.portfolio_sol_wallet_address)
+        if cfg.portfolio_wallet_address and not (cfg.portfolio_evm_wallet_address or cfg.portfolio_sol_wallet_address):
+            if cfg.portfolio_wallet_address.startswith("0x"):
+                cfg.portfolio_evm_wallet_address = cfg.portfolio_wallet_address
+            else:
+                cfg.portfolio_sol_wallet_address = cfg.portfolio_wallet_address
+        cfg.portfolio_holdings_cache = normalize_portfolio_holdings_cache(data.get("portfolio_holdings_cache"))
         cfg.wallets = normalize_wallets(data)
         cfg.tokens = normalize_tokens(data)
         pinned = primary_token(cfg.tokens)
@@ -165,7 +181,18 @@ class AppConfig:
 
         if is_empty_default_config(data) and existing and has_user_config_state(existing):
             restored = dict(existing)
-            for key in ("x", "y", "locked", "autostart", "refresh_interval_ms"):
+            for key in (
+                "x",
+                "y",
+                "locked",
+                "autostart",
+                "refresh_interval_ms",
+                "skin",
+                "portfolio_wallet_address",
+                "portfolio_evm_wallet_address",
+                "portfolio_sol_wallet_address",
+                "portfolio_holdings_cache",
+            ):
                 restored[key] = data.get(key)
             data = restored
             restored_cfg = self.from_data(data)
@@ -173,7 +200,18 @@ class AppConfig:
                 setattr(self, field, value)
         elif is_empty_default_config(data) and backup_data and has_user_config_state(backup_data):
             restored = dict(backup_data)
-            for key in ("x", "y", "locked", "autostart", "refresh_interval_ms"):
+            for key in (
+                "x",
+                "y",
+                "locked",
+                "autostart",
+                "refresh_interval_ms",
+                "skin",
+                "portfolio_wallet_address",
+                "portfolio_evm_wallet_address",
+                "portfolio_sol_wallet_address",
+                "portfolio_holdings_cache",
+            ):
                 restored[key] = data.get(key)
             data = restored
             restored_cfg = self.from_data(data)
@@ -201,6 +239,13 @@ def clamp_refresh_interval(ms: int) -> int:
     return max(100, min(int(ms), 60_000))
 
 
+def normalize_skin_name(value: object) -> str:
+    raw = str(value or "").lower().strip()
+    aliases = {"origin": "default", "original": "default", "base": "default", "原皮": "default"}
+    raw = aliases.get(raw, raw)
+    return raw if raw in AVAILABLE_SKINS else "default"
+
+
 def read_config_data(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -223,6 +268,12 @@ def has_user_config_state(data: dict[str, Any]) -> bool:
     if address and address != DEFAULT_ADDRESS:
         return True
     if normalize_tokens(data, include_default=False):
+        return True
+    if str(data.get("portfolio_wallet_address") or "").strip():
+        return True
+    if str(data.get("portfolio_evm_wallet_address") or "").strip():
+        return True
+    if str(data.get("portfolio_sol_wallet_address") or "").strip():
         return True
     return bool(normalize_wallets(data))
 
@@ -401,6 +452,27 @@ def normalize_wallet(item: dict[str, Any]) -> dict[str, Any]:
         "avatar_kind": avatar_kind,
         "avatar_value": avatar_value,
     }
+
+
+def normalize_plain_wallet_address(address: object) -> str:
+    value = str(address or "").strip()
+    if value.startswith(("0x", "0X")):
+        return value.lower()
+    return value
+
+
+def normalize_portfolio_holdings_cache(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    cache: list[dict[str, Any]] = []
+    for item in value[:20]:
+        if not isinstance(item, dict):
+            continue
+        clean = dict(item)
+        clean.pop("_logo_pixmap", None)
+        clean.pop("raw", None)
+        cache.append(clean)
+    return cache
 
 
 def normalize_chains(value: Any, address: str = "", preferred: str = "") -> list[str]:

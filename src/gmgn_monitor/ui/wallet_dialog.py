@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QListWidget, QLi
 from gmgn_monitor.config import app_data_dir
 from gmgn_monitor.gmgn_client import GmgnOpenApiClient, possible_wallet_chains
 from gmgn_monitor.ui.images import avatar_pixmap
+from gmgn_monitor.ui.theme import active_theme, get_theme, hex_rgb, rgba
 
 from gmgn_monitor.ui.emoji_picker import EmojiPicker, first_emoji
 
@@ -141,18 +142,19 @@ class WalletItemDelegate(QStyledItemDelegate):
         wallet = index.data(Qt.ItemDataRole.UserRole) or {}
         rect = option.rect.adjusted(4, 4, -4, -4)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        theme = active_theme()
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         if wallet.get("_message"):
             painter.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold))
-            painter.setPen(QColor(166, 188, 181))
+            painter.setPen(theme.color("muted"))
             painter.drawText(rect.adjusted(10, 0, -10, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, str(wallet["_message"]))
             painter.restore()
             return
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(53, 218, 143, 48) if selected else QColor(255, 255, 255, 0))
+        painter.setBrush(theme.color("accent", 48) if selected else QColor(255, 255, 255, 0))
         painter.drawRoundedRect(rect, 8, 8)
 
         avatar_rect = QRect(rect.left() + 8, rect.top() + 7, 38, 38)
@@ -168,14 +170,14 @@ class WalletItemDelegate(QStyledItemDelegate):
         remark_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Black)
         sub_font = QFont("Cascadia Mono", 7, QFont.Weight.Bold)
         painter.setFont(remark_font)
-        painter.setPen(QColor(245, 255, 250))
+        painter.setPen(theme.color("text"))
         painter.drawText(
             QRect(text_left, rect.top() + 8, text_width, 17),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             QFontMetrics(remark_font).elidedText(remark, Qt.TextElideMode.ElideRight, text_width),
         )
         painter.setFont(sub_font)
-        painter.setPen(QColor(194, 213, 205))
+        painter.setPen(theme.color("text_soft"))
         painter.drawText(
             QRect(text_left, rect.top() + 28, text_width, 16),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -192,12 +194,13 @@ class KolResultDelegate(QStyledItemDelegate):
         wallet = index.data(Qt.ItemDataRole.UserRole) or {}
         rect = option.rect.adjusted(4, 3, -4, -3)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        theme = active_theme()
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(53, 218, 143, 62) if selected else QColor(255, 255, 255, 10))
+        painter.setBrush(theme.color("accent", 62) if selected else QColor(255, 255, 255, 10))
         painter.drawRoundedRect(rect, 9, 9)
 
         avatar_rect = QRect(rect.left() + 8, rect.top() + 7, 26, 26)
@@ -211,10 +214,10 @@ class KolResultDelegate(QStyledItemDelegate):
         name_font = QFont("Microsoft YaHei UI", 8, QFont.Weight.Black)
         sub_font = QFont("Cascadia Mono", 7, QFont.Weight.Bold)
         painter.setFont(name_font)
-        painter.setPen(QColor(241, 255, 248))
+        painter.setPen(theme.color("text"))
         painter.drawText(QRect(text_left, rect.top() + 5, text_width, 15), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, QFontMetrics(name_font).elidedText(name, Qt.TextElideMode.ElideRight, text_width))
         painter.setFont(sub_font)
-        painter.setPen(QColor(132, 234, 181))
+        painter.setPen(theme.color("accent_hover"))
         painter.drawText(QRect(text_left, rect.top() + 22, text_width, 13), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, QFontMetrics(sub_font).elidedText(f"{chain} {short_address(address)}", Qt.TextElideMode.ElideRight, text_width))
         painter.restore()
 
@@ -241,6 +244,7 @@ class WalletDialog(QDialog):
         self._loading_wallet = False
         self._api_key = api_key
         self._api_host = api_host
+        self._theme = active_theme()
         self._search_request_id = 0
         self._kol_search_worker: KolSearchWorker | None = None
         self._kol_workers: list[KolSearchWorker] = []
@@ -318,6 +322,13 @@ class WalletDialog(QDialog):
         self._apply_styles()
         self._refresh_list()
 
+    def set_theme(self, skin: str) -> None:
+        self._theme = get_theme(skin)
+        self._apply_styles()
+        self.list_widget.viewport().update()
+        self.kol_result_list.viewport().update()
+        self.update()
+
     @property
     def wallets(self) -> list[dict[str, Any]]:
         self._sync_current_wallet_preview()
@@ -350,22 +361,22 @@ class WalletDialog(QDialog):
 
         rect = self.rect().adjusted(7, 7, -7, -7)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 95))
+        painter.setBrush(self._theme.color("shadow", 95))
         painter.drawRoundedRect(rect.adjusted(0, 9, 0, 9), 20, 20)
 
         path = QPainterPath()
         path.addRoundedRect(QRectF(rect), 20, 20)
         grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        grad.setColorAt(0.0, QColor(19, 29, 29, 250))
-        grad.setColorAt(0.55, QColor(8, 13, 15, 248))
-        grad.setColorAt(1.0, QColor(4, 7, 9, 252))
+        grad.setColorAt(0.0, self._theme.color("panel_top"))
+        grad.setColorAt(0.55, self._theme.color("panel_mid"))
+        grad.setColorAt(1.0, self._theme.color("panel_bottom"))
         painter.fillPath(path, grad)
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(255, 255, 255, 38), 1))
+        painter.setPen(QPen(self._theme.color("border", 72), 1))
         painter.drawPath(path)
 
-        painter.setPen(QColor(239, 249, 245))
+        painter.setPen(self._theme.color("text"))
         painter.setFont(QFont("Segoe UI Variable Display", 17, QFont.Weight.Black))
         painter.drawText(28, 30, 250, 24, Qt.AlignmentFlag.AlignLeft, "钱包监控")
 
@@ -586,165 +597,214 @@ class WalletDialog(QDialog):
         return "emoji", DEFAULT_EMOJI
 
     def _apply_styles(self) -> None:
+        theme = self._theme
         field_css = """
-            QLineEdit {
-                background: rgba(11, 17, 19, 238);
-                color: #eef8f4;
-                border: 1px solid rgba(255,255,255,34);
+            QLineEdit {{
+                background: {field_bg};
+                color: {text};
+                border: 1px solid {border};
                 border-radius: 10px;
                 padding: 7px 10px;
-                selection-color: #f4fff9;
-                selection-background-color: #1f7f59;
+                selection-color: {text};
+                selection-background-color: {selection};
                 font: 700 12px "Segoe UI Variable Text";
-            }
-            QLineEdit:focus {
-                border: 1px solid rgba(76,238,157,178);
-                background: rgba(17, 25, 27, 244);
-            }
-        """
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {focus_border};
+                background: {field_focus};
+            }}
+        """.format(
+            field_bg=rgba(theme.field_bg, 238),
+            text=hex_rgb(theme.text),
+            border=rgba(theme.border, 70),
+            selection=rgba(theme.accent, 145),
+            focus_border=rgba(theme.border_hover, 178),
+            field_focus=rgba(theme.field_focus, 244),
+        )
         self.remark_edit.setStyleSheet(field_css)
         self.address_edit.setStyleSheet(field_css + 'QLineEdit { font: 600 9px "Cascadia Mono"; }')
         self.kol_search_edit.setStyleSheet(
             """
-            QLineEdit {
-                background: rgba(11, 22, 18, 244);
-                color: #effff7;
-                border: 1px solid rgba(71, 238, 153, 92);
+            QLineEdit {{
+                background: {surface};
+                color: {text};
+                border: 1px solid {border};
                 border-radius: 11px;
                 padding: 7px 11px;
-                selection-color: #f4fff9;
-                selection-background-color: #1f7f59;
+                selection-color: {text};
+                selection-background-color: {selection};
                 font: 900 12px "Microsoft YaHei UI";
-            }
-            QLineEdit:focus {
-                border: 1px solid rgba(83,255,173,190);
-                background: rgba(14, 30, 24, 250);
-            }
-            """
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {focus_border};
+                background: {field_focus};
+            }}
+            """.format(
+                surface=rgba(theme.surface, 244),
+                text=hex_rgb(theme.text),
+                border=rgba(theme.accent, 92),
+                selection=rgba(theme.accent, 145),
+                focus_border=rgba(theme.accent_hover, 190),
+                field_focus=rgba(theme.field_focus, 250),
+            )
         )
         self.avatar_button.setStyleSheet(
             """
-            QPushButton {
-                background: rgba(11, 17, 19, 238);
-                color: #eef8f4;
-                border: 1px solid rgba(255,255,255,34);
+            QPushButton {{
+                background: {field_bg};
+                color: {text};
+                border: 1px solid {border};
                 border-radius: 10px;
                 padding: 0px;
                 font: 900 13px "Microsoft YaHei UI";
-            }
-            QPushButton:hover, QPushButton:focus {
-                border: 1px solid rgba(76,238,157,178);
-                background: rgba(17, 25, 27, 244);
-            }
-            """
+            }}
+            QPushButton:hover, QPushButton:focus {{
+                border: 1px solid {focus_border};
+                background: {field_focus};
+            }}
+            """.format(
+                field_bg=rgba(theme.field_bg, 238),
+                text=hex_rgb(theme.text),
+                border=rgba(theme.border, 70),
+                focus_border=rgba(theme.border_hover, 178),
+                field_focus=rgba(theme.field_focus, 244),
+            )
         )
         self.list_widget.setStyleSheet(
             """
-            QListWidget {
-                background: rgba(8, 12, 14, 222);
-                color: #edf7f3;
-                border: 1px solid rgba(255,255,255,30);
+            QListWidget {{
+                background: {list_bg};
+                color: {text};
+                border: 1px solid {border};
                 border-radius: 12px;
                 padding: 6px;
                 font: 700 11px "Segoe UI Variable Text";
-            }
-            QListWidget::item {
+            }}
+            QListWidget::item {{
                 min-height: 42px;
                 padding: 7px 8px;
                 border-radius: 8px;
-                color: #d8e7e2;
-            }
-            QListWidget::item:selected {
-                background: rgba(53, 218, 143, 42);
-                color: #ffffff;
-            }
-            QScrollBar:horizontal {
+                color: {text_soft};
+            }}
+            QListWidget::item:selected {{
+                background: {selected};
+                color: {text};
+            }}
+            QScrollBar:horizontal {{
                 height: 0px;
                 background: transparent;
-            }
-            QScrollBar:vertical {
+            }}
+            QScrollBar:vertical {{
                 width: 7px;
                 background: transparent;
                 margin: 8px 2px 8px 0px;
-            }
-            QScrollBar::handle:vertical {
+            }}
+            QScrollBar::handle:vertical {{
                 min-height: 26px;
                 border-radius: 3px;
-                background: rgba(179, 206, 196, 115);
-            }
-            QScrollBar::handle:vertical:hover {
-                background: rgba(77, 238, 156, 165);
-            }
+                background: {scroll};
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {scroll_hover};
+            }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
                 height: 0px;
                 background: transparent;
-            }
-            """
+            }}
+            """.format(
+                list_bg=rgba(theme.list_bg, 222),
+                text=hex_rgb(theme.text),
+                border=rgba(theme.border, 55),
+                text_soft=hex_rgb(theme.text_soft),
+                selected=rgba(theme.accent, 42),
+                scroll=rgba(theme.muted, 115),
+                scroll_hover=rgba(theme.accent, 165),
+            )
         )
         self.kol_result_list.setStyleSheet(
             """
-            QListWidget {
-                background: rgba(5, 10, 11, 246);
-                color: #edf7f3;
-                border: 1px solid rgba(76,238,157,110);
+            QListWidget {{
+                background: {panel};
+                color: {text};
+                border: 1px solid {border};
                 border-radius: 12px;
                 padding: 5px;
                 font: 700 10px "Microsoft YaHei UI";
-            }
-            QListWidget::item {
+            }}
+            QListWidget::item {{
                 min-height: 36px;
                 padding: 4px 6px;
                 border-radius: 8px;
-            }
-            QListWidget::item:selected {
-                background: rgba(53, 218, 143, 55);
-            }
-            QScrollBar:horizontal {
+            }}
+            QListWidget::item:selected {{
+                background: {selected};
+            }}
+            QScrollBar:horizontal {{
                 height: 0px;
                 background: transparent;
-            }
-            QScrollBar:vertical {
+            }}
+            QScrollBar:vertical {{
                 width: 7px;
                 background: transparent;
                 margin: 8px 2px 8px 0px;
-            }
-            QScrollBar::handle:vertical {
+            }}
+            QScrollBar::handle:vertical {{
                 min-height: 26px;
                 border-radius: 3px;
-                background: rgba(179, 206, 196, 115);
-            }
-            QScrollBar::handle:vertical:hover {
-                background: rgba(77, 238, 156, 165);
-            }
+                background: {scroll};
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {scroll_hover};
+            }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
                 height: 0px;
                 background: transparent;
-            }
-            """
+            }}
+            """.format(
+                panel=rgba(theme.panel_bottom, 246),
+                text=hex_rgb(theme.text),
+                border=rgba(theme.border_hover, 110),
+                selected=rgba(theme.accent, 55),
+                scroll=rgba(theme.muted, 115),
+                scroll_hover=rgba(theme.accent, 165),
+            )
         )
         neutral_button = """
-            QPushButton {
+            QPushButton {{
                 border-radius: 10px;
-                border: 1px solid rgba(255,255,255,28);
-                color: #dce9e5;
-                background: rgba(255,255,255,10);
+                border: 1px solid {border};
+                color: {text_soft};
+                background: {surface};
                 font: 800 12px "Segoe UI Variable Text";
-            }
-            QPushButton:hover { background: rgba(255,255,255,18); color: #ffffff; }
-            QPushButton:disabled { color: #65716f; background: rgba(255,255,255,5); }
-        """
+            }}
+            QPushButton:hover {{ background: {hover}; color: {text}; }}
+            QPushButton:disabled {{ color: {dim}; background: {disabled}; }}
+        """.format(
+            border=rgba(theme.border, 56),
+            text_soft=hex_rgb(theme.text_soft),
+            surface=rgba(theme.surface, 135),
+            hover=rgba(theme.surface_soft, 210),
+            text=hex_rgb(theme.text),
+            dim=hex_rgb(theme.dim),
+            disabled=rgba(theme.surface, 60),
+        )
         accent_button = """
-            QPushButton {
+            QPushButton {{
                 border-radius: 10px;
-                border: 1px solid rgba(103,255,184,94);
-                color: #06120d;
-                background: #39d88f;
+                border: 1px solid {border};
+                color: {accent_text};
+                background: {accent};
                 font: 900 12px "Segoe UI Variable Text";
-            }
-            QPushButton:hover { background: #52eba5; }
-        """
+            }}
+            QPushButton:hover {{ background: {accent_hover}; }}
+        """.format(
+            border=rgba(theme.accent_hover, 94),
+            accent_text=hex_rgb(theme.accent_text),
+            accent=hex_rgb(theme.accent),
+            accent_hover=hex_rgb(theme.accent_hover),
+        )
         self.add_wallet_button.setStyleSheet(neutral_button)
         self.remove_wallet_button.setStyleSheet(neutral_button)
         self.cancel_button.setStyleSheet(neutral_button)

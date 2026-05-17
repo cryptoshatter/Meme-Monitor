@@ -4,7 +4,7 @@ import logging
 import sys
 
 from PySide6.QtCore import QLockFile, QPoint, Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import APP_NAME
@@ -17,6 +17,8 @@ from .market_worker import MarketWorker
 from .ui.api_key_dialog import ApiKeyDialog
 from .ui.floating_card import FloatingCard
 from .ui.images import tray_icon
+from .ui.portfolio_dialog import PortfolioDialog
+from .ui.theme import SKIN_ORDER, app_stylesheet, get_theme, menu_stylesheet, normalize_skin, set_active_theme
 from .ui.token_dialog import TokenDialog
 from .ui.wallet_dialog import WalletDialog
 
@@ -45,7 +47,10 @@ class MonitorApp:
             ],
         )
         self.config.autostart = autostart.is_enabled()
+        set_active_theme(self.config.skin)
+        self.qt_app.setStyleSheet(app_stylesheet(get_theme(self.config.skin)))
         self.card = FloatingCard()
+        self.card.set_theme(self.config.skin)
         self.card.set_locked(self.config.locked)
         self.card.position_changed.connect(self._save_position)
         self.card.menu_requested.connect(self.show_context_menu)
@@ -61,6 +66,7 @@ class MonitorApp:
         self.worker: MarketWorker | None = None
         self.token_dialog: TokenDialog | None = None
         self.wallet_dialog: WalletDialog | None = None
+        self.portfolio_dialog: PortfolioDialog | None = None
         self._place_card()
         self.card.show()
         if self._ensure_api_key():
@@ -68,20 +74,29 @@ class MonitorApp:
 
     def _build_menu(self) -> QMenu:
         menu = QMenu()
-        menu.setStyleSheet(
-            """
-            QMenu { background: #11161a; color: #edf7f3; border: 1px solid #2a3439; padding: 6px; }
-            QMenu::item { padding: 8px 26px 8px 22px; border-radius: 6px; }
-            QMenu::item:selected { background: #1d7f55; }
-            QMenu::indicator:checked { image: none; background: #25d184; border-radius: 5px; width: 10px; height: 10px; }
-            """
-        )
+        menu.setStyleSheet(menu_stylesheet(get_theme(self.config.skin)))
         ca_action = QAction("CA", menu)
         ca_action.triggered.connect(self.edit_ca)
         wallet_action = QAction("钱包监控", menu)
         wallet_action.triggered.connect(self.edit_wallet)
+        portfolio_action = QAction("个人持仓", menu)
+        portfolio_action.triggered.connect(self.edit_portfolio)
         api_key_action = QAction("API Key", menu)
         api_key_action.triggered.connect(self.edit_api_key)
+        self.skin_menu = QMenu("皮肤", menu)
+        self.skin_menu.setStyleSheet(menu.styleSheet())
+        self.skin_group = QActionGroup(self.skin_menu)
+        self.skin_group.setExclusive(True)
+        self.skin_actions: dict[str, QAction] = {}
+        for skin_key in SKIN_ORDER:
+            theme = get_theme(skin_key)
+            action = QAction(theme.label, self.skin_menu)
+            action.setCheckable(True)
+            action.setChecked(normalize_skin(self.config.skin) == skin_key)
+            action.triggered.connect(lambda _checked=False, key=skin_key: self._apply_skin(key))
+            self.skin_group.addAction(action)
+            self.skin_menu.addAction(action)
+            self.skin_actions[skin_key] = action
         self.autostart_action = QAction("开机启动", menu)
         self.autostart_action.setCheckable(True)
         self.autostart_action.setChecked(self.config.autostart)
@@ -90,11 +105,33 @@ class MonitorApp:
         quit_action.triggered.connect(self.quit)
         menu.addAction(ca_action)
         menu.addAction(wallet_action)
+        menu.addAction(portfolio_action)
         menu.addAction(api_key_action)
+        menu.addMenu(self.skin_menu)
         menu.addAction(self.autostart_action)
         menu.addSeparator()
         menu.addAction(quit_action)
         return menu
+
+    def _apply_skin(self, skin: str) -> None:
+        skin = normalize_skin(skin)
+        theme = set_active_theme(skin)
+        self.config.skin = skin
+        self.config.save()
+        self.qt_app.setStyleSheet(app_stylesheet(theme))
+        if self.menu:
+            css = menu_stylesheet(theme)
+            self.menu.setStyleSheet(css)
+            self.skin_menu.setStyleSheet(css)
+        for key, action in getattr(self, "skin_actions", {}).items():
+            action.setChecked(key == skin)
+        self.card.set_theme(skin)
+        if self.token_dialog and self.token_dialog.isVisible() and hasattr(self.token_dialog, "set_theme"):
+            self.token_dialog.set_theme(skin)
+        if self.wallet_dialog and self.wallet_dialog.isVisible() and hasattr(self.wallet_dialog, "set_theme"):
+            self.wallet_dialog.set_theme(skin)
+        if self.portfolio_dialog and self.portfolio_dialog.isVisible() and hasattr(self.portfolio_dialog, "set_theme"):
+            self.portfolio_dialog.set_theme(skin)
 
     def show_context_menu(self, pos: QPoint) -> None:
         self.menu.popup(pos)
@@ -245,6 +282,61 @@ class MonitorApp:
     def _clear_wallet_dialog(self, dialog: WalletDialog) -> None:
         if self.wallet_dialog is dialog:
             self.wallet_dialog = None
+
+    def edit_portfolio(self) -> None:
+        if self.portfolio_dialog and self.portfolio_dialog.isVisible():
+            self.portfolio_dialog.raise_()
+            self.portfolio_dialog.activateWindow()
+            return
+        dialog = PortfolioDialog(
+            self.config.api_key(),
+            self.config.api_host,
+            self.config.portfolio_evm_wallet_address,
+            self.config.portfolio_sol_wallet_address,
+            self.config.portfolio_holdings_cache or [],
+            self.card,
+        )
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.wallet_addresses_changed.connect(self._save_portfolio_wallet_addresses)
+        dialog.holdings_updated.connect(self._save_portfolio_holdings_cache)
+        dialog.finished.connect(lambda _result: self._clear_portfolio_dialog(dialog))
+        self.portfolio_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _clear_portfolio_dialog(self, dialog: PortfolioDialog) -> None:
+        if self.portfolio_dialog is dialog:
+            self.portfolio_dialog = None
+
+    def _save_portfolio_wallet_addresses(self, evm_address: str, sol_address: str) -> None:
+        evm_address = str(evm_address or "").strip().lower()
+        sol_address = str(sol_address or "").strip()
+        legacy_address = evm_address or sol_address
+        if (
+            self.config.portfolio_evm_wallet_address == evm_address
+            and self.config.portfolio_sol_wallet_address == sol_address
+            and self.config.portfolio_wallet_address == legacy_address
+        ):
+            return
+        self.config.portfolio_evm_wallet_address = evm_address
+        self.config.portfolio_sol_wallet_address = sol_address
+        self.config.portfolio_wallet_address = legacy_address
+        self.config.save()
+
+    def _save_portfolio_holdings_cache(self, holdings: object) -> None:
+        if not isinstance(holdings, list):
+            return
+        clean: list[dict[str, object]] = []
+        for item in holdings[:20]:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            row.pop("_logo_pixmap", None)
+            row.pop("raw", None)
+            clean.append(row)
+        self.config.portfolio_holdings_cache = clean
+        self.config.save()
 
     def _apply_wallet_dialog(self, dialog: WalletDialog) -> None:
         self._save_wallet_list(dialog.wallets)

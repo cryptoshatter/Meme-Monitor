@@ -23,20 +23,21 @@ from PySide6.QtGui import (
     QPolygonF,
     QRadialGradient,
 )
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QToolTip, QWidget
 
 from gmgn_monitor.gmgn_client import TokenSnapshot, WalletActivitySnapshot
 from gmgn_monitor.config import app_data_dir
 from gmgn_monitor.ui.images import LogoLoader, avatar_pixmap, native_icon, token_fallback_logo
+from gmgn_monitor.ui.theme import active_theme, get_theme
 
 
 MIN_W = 292
-MAX_W = 540
+MAX_W = 620
 COLLAPSED_SIDE_MIN_W = 66
 COLLAPSED_SIDE_MAX_W = 118
 COLLAPSED_SIDE_MIN_H = 118
 COLLAPSED_BAR_MIN_W = 292
-COLLAPSED_BAR_MAX_W = 560
+COLLAPSED_BAR_MAX_W = 640
 COLLAPSED_BAR_H = 46
 CARD_H = 158
 CARD_ALERT_H = 184
@@ -87,6 +88,7 @@ class TokenAlertDisplay:
     address: str = ""
     logo_url: str = ""
     delta_percent: float | None = None
+    trigger_delta_percent: float | None = None
     threshold_percent: float | None = None
     market_cap: float | None = None
     price: float | None = None
@@ -112,10 +114,15 @@ class WalletActivityPanel(QWidget):
         self._hover_row = -1
         self._resonance: dict[str, int] = {}
         self._token_logo_provider = None
+        self._theme = active_theme()
         self.resize(316, 56)
 
     def set_token_logo_provider(self, provider) -> None:
         self._token_logo_provider = provider
+
+    def set_theme(self, skin: str) -> None:
+        self._theme = get_theme(skin)
+        self.update()
 
     def set_activities(self, activities: list[WalletDisplay]) -> None:
         self._activities = list(activities[:5])
@@ -137,24 +144,24 @@ class WalletActivityPanel(QWidget):
         path = QPainterPath()
         path.addRoundedRect(QRectF(panel), 18, 18)
         base = QLinearGradient(panel.topLeft(), panel.bottomRight())
-        base.setColorAt(0.0, QColor(17, 27, 27, 246))
-        base.setColorAt(1.0, QColor(4, 8, 10, 252))
+        base.setColorAt(0.0, self._theme.color("panel_top"))
+        base.setColorAt(1.0, self._theme.color("panel_bottom"))
         painter.fillPath(path, base)
-        painter.setPen(QPen(QColor(132, 151, 148, 76), 1.05))
+        painter.setPen(QPen(self._theme.color("border", 76), 1.05))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
 
         painter.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Black))
-        painter.setPen(QColor(228, 242, 238))
+        painter.setPen(self._theme.color("text"))
         painter.drawText(QRect(panel.left() + 14, panel.top() + 10, 120, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "钱包动态")
         painter.setFont(QFont("Segoe UI Variable Text", 7, QFont.Weight.Bold))
-        painter.setPen(QColor(116, 134, 132))
+        painter.setPen(self._theme.color("muted"))
         painter.drawText(QRect(panel.right() - 92, panel.top() + 10, 78, 18), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "LATEST 5")
 
         self._row_rects = []
         if not self._activities:
             painter.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
-            painter.setPen(QColor(122, 138, 136))
+            painter.setPen(self._theme.color("muted"))
             painter.drawText(panel.adjusted(14, 36, -14, -12), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "暂无钱包动态")
             return
 
@@ -194,7 +201,7 @@ class WalletActivityPanel(QWidget):
         self.update()
 
     def _draw_row(self, painter: QPainter, rect: QRect, activity: WalletDisplay, index: int) -> None:
-        side_color = QColor(48, 235, 137) if activity.side == "buy" else QColor(255, 82, 103)
+        side_color = self._theme.color("positive") if activity.side == "buy" else self._theme.color("negative")
         if index == self._hover_row:
             hover = QColor(side_color)
             hover.setAlpha(22)
@@ -230,17 +237,17 @@ class WalletActivityPanel(QWidget):
         x = rect.right() - time_w - resonance_w - 6
         if resonance_text:
             tag = QRect(x, rect.top() + 8, resonance_w - 6, 18)
-            tag_color = QColor(35, 115, 83, 150)
-            painter.setPen(QPen(QColor(73, 238, 158, 75), 1))
+            tag_color = self._theme.color("accent_soft", 150)
+            painter.setPen(QPen(self._theme.color("accent", 75), 1))
             painter.setBrush(tag_color)
             painter.drawRoundedRect(tag, 8, 8)
             painter.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.Black))
-            painter.setPen(QColor(166, 255, 214))
+            painter.setPen(self._theme.color("text"))
             painter.drawText(tag, Qt.AlignmentFlag.AlignCenter, resonance_text)
             x += resonance_w
         if time_text:
             painter.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.Bold))
-            painter.setPen(QColor(136, 153, 150))
+            painter.setPen(self._theme.color("muted"))
             painter.drawText(QRect(rect.right() - time_w - 2, rect.top() + 8, time_w, 18), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, time_text)
 
     def _resonance_text(self, activity: WalletDisplay) -> str:
@@ -363,6 +370,7 @@ class FloatingCard(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setMouseTracking(True)
 
+        self._theme = active_theme()
         self._data = DisplayData()
         self._logo = token_fallback_logo(self._data.symbol, self._data.chain, 22)
         self._logo_url = ""
@@ -418,6 +426,7 @@ class FloatingCard(QWidget):
         self._dock_anim.finished.connect(self._on_dock_anim_finished)
 
         self._activity_panel = WalletActivityPanel()
+        self._activity_panel.set_theme(self._theme.key)
         self._activity_panel.set_token_logo_provider(self._token_logo_pixmap)
         self._activity_panel.token_requested.connect(self._open_gmgn_token)
         self._load_wallet_history()
@@ -474,23 +483,39 @@ class FloatingCard(QWidget):
         self._clock_timer.timeout.connect(self._on_clock_tick)
         self._clock_timer.start()
 
+    def set_theme(self, skin: str) -> None:
+        self._theme = get_theme(skin)
+        self._activity_panel.set_theme(skin)
+        self.update()
+
     def set_locked(self, locked: bool) -> None:
         self._locked = locked
 
     def set_status(self, text: str) -> None:
         self._data.status = text
+        if text != "Error" and self.toolTip():
+            self.setToolTip("")
+            QToolTip.hideText()
         self.update()
 
     def set_error(self, text: str) -> None:
         self._data.status = "Error"
-        self.setToolTip(text)
+        if self.toolTip():
+            self.setToolTip("")
+        QToolTip.hideText()
         self.update()
 
     def update_snapshot(self, snap: TokenSnapshot) -> None:
         if snap.price is None and snap.market_cap is None and self._data.price is not None:
             self._data.status = "Live"
+            if self.toolTip():
+                self.setToolTip("")
+                QToolTip.hideText()
             self.update()
             return
+        if self.toolTip():
+            self.setToolTip("")
+            QToolTip.hideText()
         old_mc = self._target_mc
         old_price = self._target_price
         self._data = DisplayData(
@@ -599,21 +624,34 @@ class FloatingCard(QWidget):
             return
         if f"{chain}:{address}".lower() == f"{self._data.chain}:{self._data.address}".lower():
             return
+        old_alert = self._token_alert
+        same_alert = f"{old_alert.chain}:{old_alert.address}".lower() == f"{chain}:{address}".lower()
+        triggered = bool(payload.get("triggered", True))
+        if not triggered and not same_alert and old_alert.address:
+            return
+        trigger_delta = to_float_or_none(payload.get("trigger_delta_percent"))
+        if not triggered and same_alert and self._token_alert_flash > 0 and old_alert.trigger_delta_percent is not None:
+            trigger_delta = old_alert.trigger_delta_percent
+        received_at = float(payload.get("received_at") or time.time())
+        if not triggered and same_alert:
+            received_at = old_alert.received_at
         self._token_alert = TokenAlertDisplay(
             symbol=str(payload.get("symbol") or "TOKEN").strip()[:18] or "TOKEN",
             chain=chain,
             address=address,
             logo_url=str(payload.get("logo_url") or "").strip(),
             delta_percent=to_float_or_none(payload.get("delta_percent")),
+            trigger_delta_percent=trigger_delta,
             threshold_percent=to_float_or_none(payload.get("threshold_percent")),
             market_cap=to_float_or_none(payload.get("market_cap")),
             price=to_float_or_none(payload.get("price")),
-            received_at=float(payload.get("received_at") or time.time()),
+            received_at=received_at,
         )
         self._ensure_asset_logo(self._token_alert.logo_url)
         self._resize_for_content()
-        self._token_alert_anim.stop()
-        self._token_alert_anim.start()
+        if triggered:
+            self._token_alert_anim.stop()
+            self._token_alert_anim.start()
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -948,18 +986,35 @@ class FloatingCard(QWidget):
         content_w = MARGIN * 2 + max(mc_w, change_w + trend_w + 4, min(74, symbol_w), 18 + 9 + 8) + 16
         content_h = MARGIN * 2 + 9 + 18 + 7 + 16 + 7 + 22 + 5 + 17 + 9
         if self._has_active_token_alert():
-            content_w = max(content_w, MARGIN * 2 + min(126, self._collapsed_alert_inline_width()) + 16)
+            content_w = max(content_w, MARGIN * 2 + self._collapsed_alert_side_width() + 16)
             content_h += 38
-        max_side_w = COLLAPSED_SIDE_MAX_W + (48 if self._has_active_token_alert() else 0)
+        max_side_w = COLLAPSED_SIDE_MAX_W + (76 if self._has_active_token_alert() else 0)
         return QSize(clamp_int(content_w, COLLAPSED_SIDE_MIN_W, max_side_w), max(COLLAPSED_SIDE_MIN_H, content_h))
 
     def _collapsed_alert_inline_width(self) -> int:
         symbol = self._token_alert.symbol or "--"
+        value_text = self._token_alert_value_text()
+        change_text = format_change(self._token_alert.delta_percent)
         time_text = self._token_alert_time_text()
         symbol_w = QFontMetrics(self._collapsed_side_symbol_font()).horizontalAdvance(symbol)
         time_w = QFontMetrics(self._collapsed_side_time_font()).horizontalAdvance(time_text) if time_text else 0
-        change_w = QFontMetrics(self._collapsed_change_font()).horizontalAdvance(format_change(self._token_alert.delta_percent))
-        return clamp_int(24 + 16 + 6 + min(symbol_w, 92) + 5 + change_w + 17 + time_w + 8, 136, 210)
+        value_w = QFontMetrics(self._collapsed_change_font()).horizontalAdvance(value_text)
+        change_w = QFontMetrics(self._collapsed_change_font()).horizontalAdvance(change_text)
+        return clamp_int(24 + 16 + 6 + min(symbol_w, 118) + 7 + value_w + 7 + change_w + 17 + time_w + 10, 168, 282)
+
+    def _collapsed_alert_side_width(self) -> int:
+        symbol = self._token_alert.symbol or "--"
+        value_text = self._token_alert_value_text()
+        change_text = format_change(self._token_alert.delta_percent)
+        time_text = self._token_alert_time_text()
+        symbol_w = QFontMetrics(self._collapsed_side_symbol_font()).horizontalAdvance(symbol)
+        metrics = QFontMetrics(self._collapsed_side_change_font())
+        value_w = metrics.horizontalAdvance(value_text)
+        change_w = metrics.horizontalAdvance(change_text)
+        time_w = QFontMetrics(self._collapsed_side_time_font()).horizontalAdvance(time_text) if time_text else 0
+        line_1 = min(symbol_w, 112)
+        line_2 = value_w + 6 + change_w + 4 + 13 + (4 + time_w if time_text else 0)
+        return clamp_int(14 + 6 + max(line_1, line_2) + 8, 132, 174)
 
     def _collapsed_alert_size_for_edge(self, edge: str) -> QSize:
         value_text = self._token_alert_value_text()
@@ -1116,17 +1171,22 @@ class FloatingCard(QWidget):
         delta = self._token_alert.delta_percent
         sign = "+" if delta is not None and delta > 0 else ""
         change = f"{sign}{delta:.2f}%" if delta is not None else "--"
-        return f"{self._token_alert.symbol} {change}"
+        return f"{self._token_alert.symbol} {self._token_alert_value_text()} {change}"
+
+    def _token_alert_effect_delta(self) -> float:
+        if self._token_alert_flash > 0 and self._token_alert.trigger_delta_percent is not None:
+            return self._token_alert.trigger_delta_percent
+        return self._token_alert.delta_percent or 0.0
 
     def _token_alert_direction_text(self) -> str:
-        return "\u4e0a\u6da8" if (self._token_alert.delta_percent or 0) >= 0 else "\u4e0b\u8dcc"
+        return "\u4e0a\u6da8" if self._token_alert_effect_delta() >= 0 else "\u4e0b\u8dcc"
 
     def _token_alert_notice_text(self, compact: bool = False, tiny: bool = False) -> str:
         symbol = self._token_alert.symbol or "TOKEN"
         threshold = format_threshold_percent(self._token_alert.threshold_percent)
         if tiny:
-            direction = "\u6da8" if (self._token_alert.delta_percent or 0) >= 0 else "\u8dcc"
-            return f"{direction}{threshold}!"
+            direction = "\u6da8" if self._token_alert_effect_delta() >= 0 else "\u8dcc"
+            return f"{symbol} {direction}{threshold}!"
         if compact:
             return f"{symbol} {self._token_alert_direction_text()} {threshold}!"
         return f"{symbol} {self._token_alert_direction_text()} {threshold} !!!"
@@ -1236,6 +1296,9 @@ class FloatingCard(QWidget):
             time_w = QFontMetrics(self._wallet_time_font()).horizontalAdvance(format_relative_time(self._wallet.timestamp))
             wallet_w = wallet_activity_inline_width(self._wallet, wallet_font, 14) + 28 + max(0, time_w) + 10
         alert_w = 0
+        if self._has_active_token_alert():
+            time_w = QFontMetrics(self._wallet_time_font()).horizontalAdvance(self._token_alert_time_text())
+            alert_w = QFontMetrics(wallet_font).horizontalAdvance(self._token_alert_text_full()) + 16 + 7 + 17 + max(0, time_w) + 22
         needed = max(
             PAD_X * 2 + max(mc_w + 12 + MARKET_SIGNAL_W + 10 + side_w, price_w + 10 + change_w, wallet_w, alert_w),
             PAD_X * 2 + 22 + 8 + symbol_w + 8 + 38 + 40,
@@ -1280,31 +1343,31 @@ class FloatingCard(QWidget):
         path.addRoundedRect(QRectF(rect), 23, 23)
 
         base = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        base.setColorAt(0.0, QColor(18, 27, 27, 248))
-        base.setColorAt(0.48, QColor(8, 13, 15, 246))
-        base.setColorAt(1.0, QColor(4, 7, 9, 252))
+        base.setColorAt(0.0, self._theme.color("panel_top"))
+        base.setColorAt(0.48, self._theme.color("panel_mid"))
+        base.setColorAt(1.0, self._theme.color("panel_bottom"))
         painter.fillPath(path, base)
 
         glow = QRadialGradient(rect.left() + 34, rect.top() + 24, 112)
-        glow.setColorAt(0.0, QColor(42, 226, 144, 16))
-        glow.setColorAt(0.56, QColor(42, 226, 144, 5))
-        glow.setColorAt(1.0, QColor(42, 226, 144, 0))
+        glow.setColorAt(0.0, self._theme.color("accent", 18))
+        glow.setColorAt(0.56, self._theme.color("accent", 6))
+        glow.setColorAt(1.0, self._theme.color("accent", 0))
         painter.fillPath(path, glow)
 
         if self._has_active_token_alert() and self._token_alert_flash > 0:
             self._draw_card_warning_effect(painter, rect, path)
 
-        border = QColor(132, 151, 148, 72)
+        border = self._theme.color("border", 72)
         if self._hover:
-            border = QColor(82, 239, 164, 132)
+            border = self._theme.color("border_hover", 132)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(border, 1.05))
         painter.drawPath(path)
 
         if self._flash > 0:
-            color = QColor(48, 241, 146, int(95 * self._flash))
+            color = self._theme.color("positive", int(95 * self._flash))
             if self._direction < 0:
-                color = QColor(255, 78, 101, int(95 * self._flash))
+                color = self._theme.color("negative", int(95 * self._flash))
             painter.setPen(QPen(color, 2.0))
             painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 22, 22)
 
@@ -1318,9 +1381,9 @@ class FloatingCard(QWidget):
 
         painter.save()
         painter.setClipPath(path)
-        is_up = (self._token_alert.delta_percent or 0) >= 0
-        hot = QColor(48, 235, 137) if is_up else QColor(255, 82, 103)
-        warm = QColor(90, 255, 185) if is_up else QColor(255, 193, 64)
+        is_up = self._token_alert_effect_delta() >= 0
+        hot = self._theme.color("positive") if is_up else self._theme.color("negative")
+        warm = self._theme.color("accent_hover") if is_up else self._theme.color("warning")
         wash = QLinearGradient(rect.topLeft(), rect.topRight())
         wash.setColorAt(0.0, QColor(hot.red(), hot.green(), hot.blue(), int(48 * strength)))
         wash.setColorAt(0.48, QColor(14, 9, 10, int(18 * strength)))
@@ -1367,7 +1430,7 @@ class FloatingCard(QWidget):
         opacity = alert_train_opacity(progress)
         if opacity <= 0.01:
             return
-        is_up = (self._token_alert.delta_percent or 0) >= 0
+        is_up = self._token_alert_effect_delta() >= 0
         side_collapsed = self._collapsed and self._collapsed_edge in {"left", "right"}
         bar_collapsed = self._collapsed and self._collapsed_edge in {"top", "bottom"}
         if side_collapsed:
@@ -1387,8 +1450,8 @@ class FloatingCard(QWidget):
         clip.addRoundedRect(QRectF(rect), 23, 23)
         painter.setClipPath(clip)
 
-        hot = QColor(48, 235, 137) if is_up else QColor(255, 82, 103)
-        warm = QColor(90, 255, 185) if is_up else QColor(255, 207, 86)
+        hot = self._theme.color("positive") if is_up else self._theme.color("negative")
+        warm = self._theme.color("accent_hover") if is_up else self._theme.color("warning")
         grad = QLinearGradient(notice.left(), 0, notice.right(), 0)
         grad.setColorAt(0.0, QColor(94, 18, 24, 0))
         grad.setColorAt(0.14, QColor(hot.red(), hot.green(), hot.blue(), int(210 * opacity)))
@@ -1415,7 +1478,7 @@ class FloatingCard(QWidget):
         font_size = 7 if side_collapsed else (9 if bar_collapsed else 12)
         font = QFont("Microsoft YaHei UI", font_size, QFont.Weight.Black)
         painter.setFont(font)
-        text_color = QColor(255, 226, 120) if is_up else QColor(255, 118, 135)
+        text_color = self._theme.color("warning") if is_up else self._theme.color("negative")
         text_color.setAlpha(int(255 * opacity))
         painter.setPen(text_color)
         text_rect = QRect(logo_rect.right() + 5, notice.top(), max(8, notice.right() - logo_rect.right() - 9), notice.height())
@@ -1441,9 +1504,9 @@ class FloatingCard(QWidget):
         painter.drawPixmap(logo_rect, self._logo)
         painter.drawPixmap(QRect(logo_rect.right() - 7, logo_rect.bottom() - 7, 10, 10), native_icon(self._data.chain, 10))
 
-        live_color = QColor(66, 232, 141) if self._data.status == "Live" else QColor(255, 188, 87)
+        live_color = self._theme.color("positive") if self._data.status == "Live" else self._theme.color("warning")
         if self._data.status == "Error":
-            live_color = QColor(255, 88, 108)
+            live_color = self._theme.color("negative")
         pulse = self._live_pulse * 2.0 if self._live_pulse <= 0.5 else (1.0 - self._live_pulse) * 2.0
         pulse = max(0.0, min(1.0, pulse))
         dot_x = right - 4
@@ -1462,16 +1525,16 @@ class FloatingCard(QWidget):
 
         symbol_font = self._collapsed_side_symbol_font()
         painter.setFont(symbol_font)
-        painter.setPen(QColor(219, 232, 229))
+        painter.setPen(self._theme.color("text"))
         symbol_rect = QRect(left, logo_rect.bottom() + 7, width, 16)
         symbol = elide_by_width(painter, self._data.symbol, symbol_rect.width())
         painter.drawText(symbol_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, symbol)
 
         mc_text = self._new_mc_text or format_market_cap(self._display_mc)
         mc_font = fit_font_to_width(self._collapsed_side_market_font(), mc_text, width, 11)
-        mc_color = QColor(245, 250, 247)
+        mc_color = self._theme.color("text")
         if self._flash > 0:
-            mc_color = QColor(67, 244, 153) if self._direction >= 0 else QColor(255, 84, 104)
+            mc_color = self._theme.color("positive") if self._direction >= 0 else self._theme.color("negative")
         painter.setFont(mc_font)
         mc_rect = QRect(left, symbol_rect.bottom() + 7, width, 23)
         self._draw_flip_text(
@@ -1485,9 +1548,9 @@ class FloatingCard(QWidget):
         )
 
         change_text = format_change(self._data.change_percent)
-        change_color = QColor(132, 144, 143)
+        change_color = self._theme.color("muted")
         if self._data.change_percent is not None:
-            change_color = QColor(55, 226, 130) if self._data.change_percent >= 0 else QColor(255, 82, 103)
+            change_color = self._theme.color("positive") if self._data.change_percent >= 0 else self._theme.color("negative")
         change_font = self._collapsed_side_change_font()
         painter.setFont(change_font)
         painter.setPen(change_color)
@@ -1507,7 +1570,7 @@ class FloatingCard(QWidget):
         width = max(1, right - left)
         pulse = max(0.0, min(1.0, self._token_alert_flash))
 
-        accent = QColor(255, 82, 103, 38 + int(55 * pulse))
+        accent = self._theme.color("negative", 38 + int(55 * pulse))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(accent)
         painter.drawRoundedRect(rect.adjusted(4, 4, -4, -4), 16, 16)
@@ -1518,7 +1581,7 @@ class FloatingCard(QWidget):
 
         symbol_font = self._collapsed_side_symbol_font()
         painter.setFont(symbol_font)
-        painter.setPen(QColor(219, 232, 229))
+        painter.setPen(self._theme.color("text"))
         symbol_rect = QRect(logo_rect.right() + 7, top, max(18, right - logo_rect.right() - 7), 19)
         painter.drawText(symbol_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elide_by_width(painter, self._token_alert.symbol, symbol_rect.width()))
 
@@ -1529,7 +1592,7 @@ class FloatingCard(QWidget):
         arrow_w = 15
         mc_rect = QRect(left, logo_rect.bottom() + 8, max(24, width - time_w - arrow_w - 9), 24)
         mc_font = fit_font_to_width(self._collapsed_side_market_font(), mc_text, mc_rect.width(), 11)
-        mc_color = QColor(245, 250, 247)
+        mc_color = self._theme.color("text")
         painter.setFont(mc_font)
         painter.setPen(mc_color)
         painter.drawText(mc_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, mc_text)
@@ -1538,14 +1601,15 @@ class FloatingCard(QWidget):
         self._draw_compact_trend(painter, arrow_rect, (self._token_alert.delta_percent or 0) >= 0, 1.45)
 
         if time_text:
+            time_x = min(arrow_rect.right() + 4, right - time_w)
             painter.setFont(time_font)
-            painter.setPen(QColor(255, 214, 102))
-            painter.drawText(QRect(right - time_w, mc_rect.top() + 2, time_w, 18), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, time_text)
+            painter.setPen(self._theme.color("warning"))
+            painter.drawText(QRect(time_x, mc_rect.top() + 2, time_w, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, time_text)
 
     def _draw_collapsed_bar_content(self, painter: QPainter, rect: QRect) -> None:
         alert_rect = QRect()
         if self._has_active_token_alert():
-            alert_w = min(self._collapsed_alert_inline_width(), max(136, int(rect.width() * 0.40)))
+            alert_w = min(self._collapsed_alert_inline_width(), max(190, int(rect.width() * 0.50)))
             alert_rect = QRect(rect.right() - alert_w - 4, rect.top() + 14, alert_w, 20)
             rect = QRect(rect.left(), rect.top(), max(190, rect.width() - alert_w - 10), rect.height())
 
@@ -1561,12 +1625,12 @@ class FloatingCard(QWidget):
         symbol_limit = 86 if alert_rect.isValid() else 120
         symbol_w = min(symbol_limit, max(42, QFontMetrics(symbol_font).horizontalAdvance(self._data.symbol) + 4))
         symbol_rect = QRect(logo_rect.right() + 8, center_y - 10, symbol_w, 20)
-        painter.setPen(QColor(218, 232, 229))
+        painter.setPen(self._theme.color("text"))
         painter.drawText(symbol_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elide_by_width(painter, self._data.symbol, symbol_rect.width()))
 
-        live_color = QColor(66, 232, 141) if self._data.status == "Live" else QColor(255, 188, 87)
+        live_color = self._theme.color("positive") if self._data.status == "Live" else self._theme.color("warning")
         if self._data.status == "Error":
-            live_color = QColor(255, 88, 108)
+            live_color = self._theme.color("negative")
         pulse = self._live_pulse * 2.0 if self._live_pulse <= 0.5 else (1.0 - self._live_pulse) * 2.0
         pulse = max(0.0, min(1.0, pulse))
         dot_x = right - 4
@@ -1585,9 +1649,9 @@ class FloatingCard(QWidget):
 
         mc_text = self._new_mc_text or format_market_cap(self._display_mc)
         change_text = format_change(self._data.change_percent)
-        change_color = QColor(132, 144, 143)
+        change_color = self._theme.color("muted")
         if self._data.change_percent is not None:
-            change_color = QColor(55, 226, 130) if self._data.change_percent >= 0 else QColor(255, 82, 103)
+            change_color = self._theme.color("positive") if self._data.change_percent >= 0 else self._theme.color("negative")
 
         mc_left = symbol_rect.right() + 11
         change_font = self._collapsed_change_font()
@@ -1596,9 +1660,9 @@ class FloatingCard(QWidget):
         mc_right = right - 12 - trend_w - 7 - change_w
         mc_rect = QRect(mc_left, center_y - 14, max(38, mc_right - mc_left), 28)
         mc_font = fit_font_to_width(self._collapsed_market_font(), mc_text, mc_rect.width(), 9)
-        mc_color = QColor(245, 250, 247)
+        mc_color = self._theme.color("text")
         if self._flash > 0:
-            mc_color = QColor(67, 244, 153) if self._direction >= 0 else QColor(255, 84, 104)
+            mc_color = self._theme.color("positive") if self._direction >= 0 else self._theme.color("negative")
         painter.setFont(mc_font)
         self._draw_flip_text(
             painter,
@@ -1631,7 +1695,7 @@ class FloatingCard(QWidget):
         painter.setFont(symbol_font)
         symbol_w = min(112, max(42, QFontMetrics(symbol_font).horizontalAdvance(self._token_alert.symbol) + 4))
         symbol_rect = QRect(logo_rect.right() + 8, center_y - 10, symbol_w, 20)
-        painter.setPen(QColor(238, 246, 242))
+        painter.setPen(self._theme.color("text"))
         painter.drawText(symbol_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elide_by_width(painter, self._token_alert.symbol, symbol_rect.width()))
 
         time_text = self._token_alert_time_text()
@@ -1644,21 +1708,22 @@ class FloatingCard(QWidget):
         value_rect = QRect(value_left, center_y - 14, max(38, value_right - value_left), 28)
         value_font = fit_font_to_width(self._collapsed_market_font(), value_text, value_rect.width(), 13)
         painter.setFont(value_font)
-        painter.setPen(QColor(245, 250, 247))
+        painter.setPen(self._theme.color("text"))
         painter.drawText(value_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, value_text)
 
         arrow_rect = QRect(value_rect.right() + 5, center_y - 8, arrow_w, 17)
         self._draw_compact_trend(painter, arrow_rect, (self._token_alert.delta_percent or 0) >= 0, 1.8)
 
         if time_text:
+            time_x = min(arrow_rect.right() + 5, right - time_w)
             painter.setFont(time_font)
-            painter.setPen(QColor(255, 214, 102))
-            painter.drawText(QRect(right - time_w, center_y - 10, time_w, 20), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, time_text)
+            painter.setPen(self._theme.color("warning"))
+            painter.drawText(QRect(time_x, center_y - 10, time_w, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, time_text)
 
     def _draw_collapsed_alert_inline(self, painter: QPainter, rect: QRect, compact: bool) -> None:
         pulse = max(0.0, min(1.0, self._token_alert_flash))
         is_up = (self._token_alert.delta_percent or 0) >= 0
-        move_color = QColor(48, 235, 137) if is_up else QColor(255, 82, 103)
+        move_color = self._theme.color("positive") if is_up else self._theme.color("negative")
         bg = QColor(move_color)
         bg.setAlpha(46 + int(62 * pulse))
         painter.setPen(Qt.PenStyle.NoPen)
@@ -1677,18 +1742,19 @@ class FloatingCard(QWidget):
         arrow_w = 13 if compact else 15
         text_left = logo_rect.right() + 6
         text_right = rect.right() - time_w - arrow_w - 7
-        text_color = QColor(211, 255, 231) if is_up else QColor(255, 177, 188)
+        text_color = self._theme.color("text") if is_up else self._theme.color("negative")
 
         if compact:
             symbol_font = self._collapsed_side_symbol_font()
             change_font = self._collapsed_side_change_font()
-            symbol_rect = QRect(text_left, rect.top() + 1, max(8, text_right - text_left), 14)
+            symbol_rect = QRect(text_left, rect.top() + 1, max(8, rect.right() - text_left - 6), 14)
             painter.setFont(symbol_font)
-            painter.setPen(QColor(236, 248, 243))
+            painter.setPen(self._theme.color("text"))
             painter.drawText(symbol_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elide_by_width(painter, self._token_alert.symbol, symbol_rect.width()))
 
-            change_text = format_change(self._token_alert.delta_percent)
+            change_text = f"{self._token_alert_value_text()} {format_change(self._token_alert.delta_percent)}"
             change_rect = QRect(text_left, rect.top() + 15, max(8, text_right - text_left), 15)
+            change_font = fit_font_to_width(change_font, change_text, change_rect.width(), 6)
             painter.setFont(change_font)
             painter.setPen(text_color)
             visible = elide_by_width(painter, change_text, change_rect.width())
@@ -1698,8 +1764,9 @@ class FloatingCard(QWidget):
             arrow_rect = QRect(arrow_x, change_rect.center().y() - 7, arrow_w, 14)
         else:
             text_rect = QRect(text_left, rect.top(), max(8, text_right - text_left), rect.height())
-            text = f"{self._token_alert.symbol} {format_change(self._token_alert.delta_percent)}"
+            text = f"{self._token_alert.symbol} {self._token_alert_value_text()} {format_change(self._token_alert.delta_percent)}"
             font = self._collapsed_change_font()
+            font = fit_font_to_width(font, text, text_rect.width(), 6)
             painter.setFont(font)
             painter.setPen(text_color)
             visible = elide_by_width(painter, text, text_rect.width())
@@ -1711,9 +1778,10 @@ class FloatingCard(QWidget):
         self._draw_compact_trend(painter, arrow_rect, is_up, 1.35 if compact else 1.55)
 
         if time_text:
+            time_x = min(arrow_rect.right() + 4, rect.right() - time_w - 2)
             painter.setFont(time_font)
-            painter.setPen(QColor(255, 214, 102))
-            painter.drawText(QRect(rect.right() - time_w, rect.top(), time_w, rect.height()), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, time_text)
+            painter.setPen(self._theme.color("warning"))
+            painter.drawText(QRect(time_x, rect.top(), time_w, rect.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, time_text)
 
     def _collapsed_alert_text(self) -> str:
         time_text = self._token_alert_time_text()
@@ -1723,8 +1791,11 @@ class FloatingCard(QWidget):
 
     def _draw_collapsed_alert_pill(self, painter: QPainter, rect: QRect, compact: bool) -> None:
         pulse = max(0.0, min(1.0, self._token_alert_flash))
-        bg = QColor(94, 20, 28, 170 + int(58 * pulse))
-        edge = QColor(255, 82, 103, 80 + int(96 * pulse))
+        is_up = (self._token_alert.delta_percent or 0) >= 0
+        bg_base = self._theme.color("positive") if is_up else self._theme.color("negative")
+        bg = QColor(bg_base)
+        bg.setAlpha(170 + int(58 * pulse))
+        edge = self._theme.color("negative", 80 + int(96 * pulse))
         painter.setPen(QPen(edge, 0.9))
         painter.setBrush(bg)
         painter.drawRoundedRect(rect, 8, 8)
@@ -1733,20 +1804,20 @@ class FloatingCard(QWidget):
             clip = QPainterPath()
             clip.addRoundedRect(QRectF(rect), 8, 8)
             painter.setClipPath(clip)
-            painter.setPen(QPen(QColor(255, 190, 63, int(35 + 65 * pulse)), 1.4))
+            painter.setPen(QPen(self._theme.color("warning", int(35 + 65 * pulse)), 1.4))
             shift = int((1.0 - pulse) * 42) % 12
             for x in range(rect.left() - 16 + shift, rect.right() + 16, 12):
                 painter.drawLine(QPointF(x, rect.bottom()), QPointF(x + 12, rect.top()))
             painter.restore()
         painter.setFont(QFont("Cascadia Mono", 6 if compact else 7, QFont.Weight.Black))
-        painter.setPen(QColor(255, 215, 102))
+        painter.setPen(self._theme.color("warning"))
         painter.drawText(rect.adjusted(3, 0, -3, 0), Qt.AlignmentFlag.AlignCenter, elide_by_width(painter, self._collapsed_alert_text(), rect.width() - 6))
 
     def _draw_compact_trend(self, painter: QPainter, rect: QRect, is_up: bool, stroke: float = 2.15) -> None:
         if rect.width() <= 0 or rect.height() <= 0:
             return
         pulse = max(0.0, min(1.0, self._flash))
-        color = QColor(58, 239, 154) if is_up else QColor(255, 83, 112)
+        color = self._theme.color("positive") if is_up else self._theme.color("negative")
         color.setAlpha(150 + int(80 * pulse))
         if is_up:
             start = QPointF(rect.left() + rect.width() * 0.18, rect.bottom() - rect.height() * 0.28)
@@ -1783,24 +1854,24 @@ class FloatingCard(QWidget):
         self._token_rect = QRect(logo_rect.left(), logo_rect.top(), badge.right() - logo_rect.left() + 4, logo_rect.height())
         if self._hover_token:
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(72, 238, 161, 18))
+            painter.setBrush(self._theme.color("accent", 18))
             painter.drawRoundedRect(self._token_rect.adjusted(-4, -2, 4, 2), 10, 10)
 
         painter.drawPixmap(logo_rect, self._logo)
         painter.drawPixmap(QRect(logo_rect.right() - 8, logo_rect.bottom() - 8, 11, 11), native_icon(self._data.chain, 11))
         painter.setFont(self._symbol_font())
-        painter.setPen(QColor(235, 244, 241))
+        painter.setPen(self._theme.color("text"))
         painter.drawText(symbol_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elide_by_width(painter, self._data.symbol, symbol_rect.width()))
-        painter.setPen(QPen(QColor(86, 231, 156, 80), 1))
-        painter.setBrush(QColor(15, 82, 56, 142))
+        painter.setPen(QPen(self._theme.color("accent", 80), 1))
+        painter.setBrush(self._theme.color("accent_soft"))
         painter.drawRoundedRect(badge, 8, 8)
-        painter.setPen(QColor(177, 255, 218))
+        painter.setPen(self._theme.color("accent_hover"))
         painter.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
         painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, self._data.chain)
 
-        live_color = QColor(66, 232, 141) if self._data.status == "Live" else QColor(255, 188, 87)
+        live_color = self._theme.color("positive") if self._data.status == "Live" else self._theme.color("warning")
         if self._data.status == "Error":
-            live_color = QColor(255, 88, 108)
+            live_color = self._theme.color("negative")
         pulse = self._live_pulse * 2.0 if self._live_pulse <= 0.5 else (1.0 - self._live_pulse) * 2.0
         pulse = max(0.0, min(1.0, pulse))
         live_font = QFont("Segoe UI", 7, QFont.Weight.Black)
@@ -1840,9 +1911,9 @@ class FloatingCard(QWidget):
         signal_x = clamp_int(left + mc_text_w + 10, left + 76, vol_x - MARKET_SIGNAL_W - 12)
         market_signal_rect = QRect(signal_x, rect.top() + 40, MARKET_SIGNAL_W, 35)
         mc_rect = QRect(left, rect.top() + 39, market_signal_rect.left() - left - 7, 36)
-        mc_color = QColor(245, 250, 247)
+        mc_color = self._theme.color("text")
         if self._flash > 0:
-            mc_color = QColor(67, 244, 153) if self._direction >= 0 else QColor(255, 84, 104)
+            mc_color = self._theme.color("positive") if self._direction >= 0 else self._theme.color("negative")
         self._draw_flip_text(
             painter,
             mc_rect,
@@ -1855,10 +1926,10 @@ class FloatingCard(QWidget):
         self._draw_market_signal(painter, market_signal_rect)
 
         painter.setFont(self._label_font())
-        painter.setPen(QColor(93, 106, 106))
+        painter.setPen(self._theme.color("dim"))
         painter.drawText(QRect(vol_x, rect.top() + 41, vol_w, 12), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "VOL 24H")
         painter.setFont(self._volume_font())
-        painter.setPen(QColor(178, 191, 188))
+        painter.setPen(self._theme.color("text_soft"))
         painter.drawText(QRect(vol_x, rect.top() + 56, vol_w, 18), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, format_volume(self._data.volume_24h))
 
         bottom_y = rect.top() + 88
@@ -1873,15 +1944,15 @@ class FloatingCard(QWidget):
             price_rect,
             self._old_price_text,
             self._new_price_text,
-            QColor(188, 202, 198),
+            self._theme.color("text_soft"),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             7,
         )
 
         change = self._data.change_percent
-        change_color = QColor(132, 144, 143)
+        change_color = self._theme.color("muted")
         if change is not None:
-            change_color = QColor(55, 226, 130) if change >= 0 else QColor(255, 82, 103)
+            change_color = self._theme.color("positive") if change >= 0 else self._theme.color("negative")
         painter.setFont(self._change_font())
         painter.setPen(change_color)
         change_x = left + price_w + 12
@@ -1938,8 +2009,8 @@ class FloatingCard(QWidget):
             return
 
         is_up = self._direction >= 0
-        arrow_color = QColor(58, 239, 154) if is_up else QColor(255, 83, 112)
-        soft_color = QColor(30, 184, 222) if is_up else QColor(255, 143, 94)
+        arrow_color = self._theme.color("positive") if is_up else self._theme.color("negative")
+        soft_color = self._theme.color("info") if is_up else self._theme.color("warning")
         pulse = max(0.0, min(1.0, self._flash))
         base_alpha = 130 if self._direction == 0 else 180
         active_alpha = min(255, base_alpha + int(75 * pulse))
@@ -2026,7 +2097,7 @@ class FloatingCard(QWidget):
 
     def _draw_wallet_activity(self, painter: QPainter, rect: QRect) -> None:
         self._wallet_rect = QRect(rect)
-        side_color = QColor(48, 235, 137) if self._wallet.side == "buy" else QColor(255, 82, 103)
+        side_color = self._theme.color("positive") if self._wallet.side == "buy" else self._theme.color("negative")
         if self._hover_wallet and self._wallet.token_address:
             hover = QColor(side_color)
             hover.setAlpha(26)
@@ -2059,7 +2130,7 @@ class FloatingCard(QWidget):
         )
         if time_text:
             painter.setFont(self._wallet_time_font())
-            painter.setPen(QColor(139, 154, 151))
+            painter.setPen(self._theme.color("muted"))
             painter.drawText(
                 QRect(rect.right() - time_w, rect.top(), time_w, rect.height()),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
@@ -2076,9 +2147,9 @@ class FloatingCard(QWidget):
     def _draw_token_alert(self, painter: QPainter, rect: QRect) -> None:
         self._token_alert_rect = QRect(rect)
         is_up = (self._token_alert.delta_percent or 0) >= 0
-        move_color = QColor(48, 235, 137) if is_up else QColor(255, 82, 103)
+        move_color = self._theme.color("positive") if is_up else self._theme.color("negative")
         warn_color = move_color
-        stripe_color = QColor(90, 255, 185) if is_up else QColor(255, 185, 67)
+        stripe_color = self._theme.color("accent_hover") if is_up else self._theme.color("warning")
         pulse = max(0.0, min(1.0, self._token_alert_flash))
         bg_alpha = 42 + int(18 * self._hover_token_alert) + int(58 * pulse)
         bg = QColor(warn_color)
@@ -2122,9 +2193,10 @@ class FloatingCard(QWidget):
         arrow_rect = QRect(arrow_x, rect.top() + 4, arrow_w, 15)
         self._draw_compact_trend(painter, arrow_rect, is_up, 1.5)
         if time_text:
+            time_x = min(arrow_rect.right() + 4, rect.right() - time_w - 2)
             painter.setFont(self._wallet_time_font())
-            painter.setPen(QColor(164, 180, 176))
-            painter.drawText(QRect(rect.right() - time_w, rect.top(), time_w, rect.height()), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, time_text)
+            painter.setPen(self._theme.color("muted"))
+            painter.drawText(QRect(time_x, rect.top(), time_w, rect.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, time_text)
 
     def _wallet_text_for_width(self, painter: QPainter, width: int) -> str:
         return wallet_display_text(self._wallet, painter, width)

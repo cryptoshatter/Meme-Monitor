@@ -54,6 +54,30 @@ class WalletActivitySnapshot:
     avatar_value: str = ""
 
 
+@dataclass(slots=True)
+class WalletHoldingSnapshot:
+    chain: str
+    wallet_address: str
+    token_address: str
+    symbol: str
+    name: str
+    logo_url: str
+    balance: float | None
+    usd_value: float | None
+    unrealized_profit: float | None
+    realized_profit: float | None
+    total_profit: float | None
+    avg_buy_market_cap: float | None
+    avg_sell_market_cap: float | None
+    holding_duration_seconds: int | None
+    buy_count: int | None
+    sell_count: int | None
+    trade_count: int | None
+    last_active_timestamp: int | None
+    raw: dict[str, Any]
+    received_at: float
+
+
 SOL_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 EVM_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 CHAIN_NATIVE_ASSETS: dict[str, tuple[str, str]] = {
@@ -99,6 +123,7 @@ class GmgnOpenApiClient:
         wallet_address: str,
         limit: int = 1,
         activity_types: list[str] | None = None,
+        token_address: str = "",
     ) -> dict[str, Any]:
         wallet_address = normalize_wallet_address(wallet_address)
         params: dict[str, Any] = {
@@ -108,6 +133,9 @@ class GmgnOpenApiClient:
         }
         if activity_types:
             params["type"] = activity_types
+        token_address = str(token_address or "").strip()
+        if token_address:
+            params["token"] = token_address
         return self._normal_get(
             "/v1/user/wallet_activity",
             params,
@@ -115,17 +143,28 @@ class GmgnOpenApiClient:
             retry_network_once=True,
         )
 
-    def get_wallet_holdings(self, chain: str, wallet_address: str, limit: int = 1) -> dict[str, Any]:
+    def get_wallet_holdings(
+        self,
+        chain: str,
+        wallet_address: str,
+        limit: int = 1,
+        order_by: str = "usd_value",
+        direction: str = "desc",
+    ) -> dict[str, Any]:
         wallet_address = normalize_wallet_address(wallet_address)
         return self._normal_get(
             "/v1/user/wallet_holdings",
             {
                 "chain": chain,
                 "wallet_address": wallet_address,
-                "limit": max(1, min(int(limit), 20)),
+                "limit": max(1, min(int(limit), 50)),
+                "order_by": order_by,
+                "direction": direction,
                 "hide_airdrop": "true",
                 "hide_closed": "true",
             },
+            timeout=(2.8, 5.0),
+            retry_network_once=True,
         )
 
     def get_kol_wallets(self, chain: str, limit: int = 100) -> list[dict[str, Any]]:
@@ -460,6 +499,160 @@ def parse_kol_wallets(chain: str, data: dict[str, Any]) -> list[dict[str, Any]]:
     return wallets
 
 
+def parse_wallet_activity_items(chain: str, wallet_address: str, data: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in _extract_activities(data):
+        side = _activity_side(item)
+        if side not in {"buy", "sell"}:
+            continue
+        token = item.get("token") if isinstance(item.get("token"), dict) else {}
+        base_token = item.get("base_token") if isinstance(item.get("base_token"), dict) else {}
+        symbol = str(
+            token.get("symbol")
+            or base_token.get("symbol")
+            or item.get("token_symbol")
+            or item.get("symbol")
+            or "TOKEN"
+        ).strip() or "TOKEN"
+        name = str(token.get("name") or base_token.get("name") or item.get("token_name") or item.get("name") or symbol).strip() or symbol
+        cost_usd = _first_float(item, ["cost_usd", "amount_usd", "usd_value", "value_usd"])
+        token_amount = _first_float(item, ["token_amount", "base_amount", "amount", "amount_token", "base_token_amount"])
+        price_usd = _activity_price_usd(item, cost_usd, token_amount)
+        buy_market_cap = _activity_market_cap(item, "buy", price_usd)
+        sell_market_cap = _activity_market_cap(item, "sell", price_usd)
+        market_cap = buy_market_cap if side == "buy" else sell_market_cap if side == "sell" else buy_market_cap or sell_market_cap
+        tx_hash = str(item.get("transaction_hash") or item.get("tx_hash") or item.get("hash") or "").strip()
+        items.append(
+            {
+                "row_type": "activity",
+                "chain": chain,
+                "wallet_address": normalize_wallet_address(wallet_address),
+                "token_address": _extract_base_address(item, wallet_address),
+                "symbol": symbol[:18],
+                "name": name[:42],
+                "logo_url": _extract_token_logo_url(item),
+                "side": side,
+                "timestamp": _activity_timestamp(item) or None,
+                "cost_usd": cost_usd,
+                "token_amount": token_amount,
+                "price_usd": price_usd,
+                "market_cap": market_cap,
+                "trade_market_cap": market_cap,
+                "buy_market_cap": buy_market_cap,
+                "sell_market_cap": sell_market_cap,
+                "tx_hash": tx_hash,
+                "raw": item,
+                "received_at": time.time(),
+            }
+        )
+    items.sort(key=lambda entry: int(entry.get("timestamp") or 0), reverse=True)
+    return items
+
+
+def _activity_price_usd(item: dict[str, Any], cost_usd: float | None, token_amount: float | None) -> float | None:
+    keys = ["price_usd", "token_price_usd", "price", "token_price", "base_price", "base_price_usd"]
+    direct = _first_float(item, keys)
+    if direct is not None:
+        return direct
+    for container_name in ("token", "base_token", "baseToken", "pool", "price", "stat"):
+        container = item.get(container_name)
+        if isinstance(container, dict):
+            direct = _first_float(container, keys)
+            if direct is not None:
+                return direct
+    if cost_usd is not None and token_amount is not None and token_amount > 0:
+        return cost_usd / token_amount
+    return None
+
+
+def _activity_market_cap(item: dict[str, Any], side: str = "", price_usd: float | None = None) -> float | None:
+    side = side.lower().strip()
+    side_keys = []
+    if side == "buy":
+        side_keys = ["buy_market_cap", "buy_mcap", "buy_fdv", "market_cap_at_buy", "mcap_at_buy", "fdv_at_buy"]
+    elif side == "sell":
+        side_keys = ["sell_market_cap", "sell_mcap", "sell_fdv", "market_cap_at_sell", "mcap_at_sell", "fdv_at_sell"]
+    keys = side_keys + ["trade_market_cap", "token_market_cap", "market_cap", "marketcap", "mcap", "fdv", "fully_diluted_valuation"]
+    direct = _first_float(item, keys)
+    if direct is not None:
+        return direct
+    for container_name in ("token", "base_token", "baseToken", "pool", "stat"):
+        container = item.get(container_name)
+        if isinstance(container, dict):
+            direct = _first_float(container, keys)
+            if direct is not None:
+                return direct
+    supply = None
+    supply_keys = ["circulating_supply", "total_supply", "supply", "token_supply"]
+    for container_name in ("token", "base_token", "baseToken"):
+        container = item.get(container_name)
+        if isinstance(container, dict):
+            supply = _first_float(container, supply_keys)
+            if supply is not None:
+                break
+    if supply is None:
+        supply = _first_float(item, supply_keys)
+    if price_usd is not None and supply is not None and 0 < supply < 1_000_000_000_000_000:
+        return price_usd * supply
+    return None
+
+
+def parse_wallet_holdings(chain: str, wallet_address: str, data: dict[str, Any]) -> list[WalletHoldingSnapshot]:
+    holdings: list[WalletHoldingSnapshot] = []
+    now = time.time()
+    for item in _extract_holdings(data):
+        token = item.get("token") if isinstance(item.get("token"), dict) else {}
+        token_address = _clean_chain_address(
+            token.get("address")
+            or token.get("token_address")
+            or item.get("token_address")
+            or item.get("address")
+            or item.get("contract_address")
+        )
+        symbol = str(
+            token.get("symbol")
+            or token.get("ticker")
+            or item.get("token_symbol")
+            or item.get("symbol")
+            or "TOKEN"
+        ).strip() or "TOKEN"
+        name = str(token.get("name") or item.get("token_name") or item.get("name") or symbol).strip() or symbol
+        unrealized = _first_float(item, ["unrealized_profit", "unrealized_pnl", "unrealized_profit_usd"])
+        realized = _first_float(item, ["realized_profit", "realized_pnl", "realized_profit_usd"])
+        total = _first_float(item, ["total_profit", "total_pnl", "profit", "profit_usd"])
+        if total is None and (unrealized is not None or realized is not None):
+            total = (unrealized or 0.0) + (realized or 0.0)
+        buy_count, sell_count = _extract_holding_buy_sell_counts(item)
+        avg_buy_market_cap = _extract_holding_avg_market_cap(item, "buy")
+        avg_sell_market_cap = _extract_holding_avg_market_cap(item, "sell")
+        holdings.append(
+            WalletHoldingSnapshot(
+                chain=chain,
+                wallet_address=wallet_address,
+                token_address=token_address,
+                symbol=symbol[:18],
+                name=name[:42],
+                logo_url=_extract_token_logo_url(item),
+                balance=_first_float(item, ["balance", "amount", "token_balance", "ui_amount"]),
+                usd_value=_first_float(item, ["usd_value", "value_usd", "amount_usd", "market_value"]),
+                unrealized_profit=unrealized,
+                realized_profit=realized,
+                total_profit=total,
+                avg_buy_market_cap=avg_buy_market_cap,
+                avg_sell_market_cap=avg_sell_market_cap,
+                holding_duration_seconds=_extract_holding_duration_seconds(item, now),
+                buy_count=buy_count,
+                sell_count=sell_count,
+                trade_count=_sum_counts(buy_count, sell_count, _first_float(item, ["trade_count", "tx_count", "transaction_count", "swap_count"])),
+                last_active_timestamp=_normalize_timestamp(_first_float(item, ["last_active_timestamp", "last_active_time", "updated_at"])),
+                raw=item,
+                received_at=now,
+            )
+        )
+    holdings.sort(key=lambda item: item.usd_value or 0.0, reverse=True)
+    return holdings
+
+
 def _kol_tags(common: dict[str, Any]) -> list[str]:
     raw_tags = common.get("tags")
     if isinstance(raw_tags, list):
@@ -523,6 +716,151 @@ def _extract_token_logo_url(item: dict[str, Any]) -> str:
         if logo:
             return logo
     return str(item.get("token_logo") or item.get("logo") or item.get("logo_url") or item.get("image") or "").strip()
+
+
+def _extract_holding_trade_count(item: dict[str, Any]) -> int | None:
+    direct = _first_float(item, ["trade_count", "tx_count", "transaction_count", "swap_count"])
+    if direct is not None:
+        return max(0, int(direct))
+    buy_count = _first_float(item, ["history_total_buys", "buy_tx_count", "buy_count", "buy_trade_count"])
+    sell_count = _first_float(item, ["history_total_sells", "sell_tx_count", "sell_count", "sell_trade_count"])
+    if buy_count is None and sell_count is None:
+        return None
+    return max(0, int(buy_count or 0) + int(sell_count or 0))
+
+
+def _extract_holding_buy_sell_counts(item: dict[str, Any]) -> tuple[int | None, int | None]:
+    buy_count = _first_float(item, ["history_total_buys", "buy_tx_count", "buy_count", "buy_trade_count"])
+    sell_count = _first_float(item, ["history_total_sells", "sell_tx_count", "sell_count", "sell_trade_count"])
+    return _count_or_none(buy_count), _count_or_none(sell_count)
+
+
+def _extract_holding_avg_market_cap(item: dict[str, Any], side: str) -> float | None:
+    if side == "buy":
+        keys = [
+            "avg_buy_market_cap",
+            "average_buy_market_cap",
+            "avg_buy_mcap",
+            "average_buy_mcap",
+            "buy_avg_market_cap",
+            "buy_avg_mcap",
+            "avg_buy_fdv",
+            "buy_avg_fdv",
+        ]
+        price_keys = [
+            "avg_buy_price",
+            "average_buy_price",
+            "buy_avg_price",
+            "avg_buy_price_usd",
+            "average_cost",
+            "avg_cost",
+            "avg_entry_price",
+            "avg_price",
+        ]
+        cost_key = "history_bought_cost"
+        amount_key = "history_bought_amount"
+    else:
+        keys = [
+            "avg_sell_market_cap",
+            "average_sell_market_cap",
+            "avg_sell_mcap",
+            "average_sell_mcap",
+            "sell_avg_market_cap",
+            "sell_avg_mcap",
+            "avg_sell_fdv",
+            "sell_avg_fdv",
+        ]
+        price_keys = [
+            "avg_sell_price",
+            "average_sell_price",
+            "sell_avg_price",
+            "avg_sell_price_usd",
+            "average_sold_price",
+            "avg_sold_price",
+        ]
+        cost_key = "history_sold_income"
+        amount_key = "history_sold_amount"
+
+    direct = _first_float(item, keys)
+    if direct is not None:
+        return direct
+    for container_name in ("token", "base_token", "baseToken", "stat"):
+        container = item.get(container_name)
+        if isinstance(container, dict):
+            direct = _first_float(container, keys)
+            if direct is not None:
+                return direct
+
+    avg_price = _first_float(item, price_keys)
+    if avg_price is None:
+        total_cost = _first_float(item, [cost_key])
+        total_amount = _first_float(item, [amount_key])
+        if total_cost is not None and total_amount is not None and total_amount > 0:
+            avg_price = total_cost / total_amount
+
+    supply = _first_float(item, ["circulating_supply", "total_supply", "supply", "token_supply", "max_supply"])
+    token = item.get("token") if isinstance(item.get("token"), dict) else {}
+    if supply is None and token:
+        supply = _first_float(token, ["circulating_supply", "total_supply", "supply", "token_supply", "max_supply"])
+    if avg_price is not None and supply is not None and 0 < supply < 1_000_000_000_000_000:
+        return avg_price * supply
+    return None
+
+
+def _count_or_none(value: float | None) -> int | None:
+    if value is None:
+        return None
+    return max(0, int(value))
+
+
+def _sum_counts(buy_count: int | None, sell_count: int | None, fallback: float | None = None) -> int | None:
+    if buy_count is not None or sell_count is not None:
+        return max(0, int(buy_count or 0) + int(sell_count or 0))
+    return _count_or_none(fallback)
+
+
+def _extract_holding_duration_seconds(item: dict[str, Any], now: float) -> int | None:
+    direct = _first_float(
+        item,
+        [
+            "holding_duration",
+            "holding_duration_seconds",
+            "holding_seconds",
+            "hold_duration",
+            "hold_time",
+            "holding_time",
+            "duration",
+        ],
+    )
+    if direct is not None and direct > 0:
+        if direct > 1_000_000_000:
+            timestamp = _normalize_timestamp(direct)
+            return max(0, int(now - timestamp)) if timestamp else None
+        return max(0, int(direct))
+
+    opened_at = _normalize_timestamp(
+        _first_float(
+            item,
+            [
+                "first_buy_timestamp",
+                "first_buy_time",
+                "start_holding_at",
+                "open_timestamp",
+                "opened_at",
+                "position_open_timestamp",
+                "position_created_at",
+                "created_timestamp",
+                "create_timestamp",
+                "start_timestamp",
+                "buy_timestamp",
+                "buy_time",
+                "last_active_timestamp",
+            ],
+        )
+    )
+    if not opened_at:
+        return None
+    return max(0, int(now - opened_at))
 
 
 def possible_wallet_chains(address: str, preferred: str = "") -> list[str]:

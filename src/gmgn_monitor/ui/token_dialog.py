@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QListWidget, QLi
 
 from gmgn_monitor.gmgn_client import GmgnOpenApiClient
 from gmgn_monitor.ui.images import LogoLoader, native_icon, token_fallback_logo
+from gmgn_monitor.ui.theme import active_theme, get_theme, hex_rgb, rgba
 
 PANEL_BG_TOP = QColor(18, 27, 27, 248)
 PANEL_BG_MID = QColor(8, 13, 15, 246)
@@ -68,6 +69,7 @@ class TokenItemDelegate(QStyledItemDelegate):
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         enabled = bool(token.get("enabled", True))
         pinned = bool(token.get("pinned", False))
+        theme = active_theme()
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -77,19 +79,19 @@ class TokenItemDelegate(QStyledItemDelegate):
         row_path.addRoundedRect(QRectF(rect), 12, 12)
         bg = QLinearGradient(rect.topLeft(), rect.bottomRight())
         if pinned:
-            bg.setColorAt(0.0, QColor(20, 63, 45, 236))
-            bg.setColorAt(1.0, QColor(8, 28, 24, 238))
+            bg.setColorAt(0.0, theme.color("surface_soft", 236))
+            bg.setColorAt(1.0, theme.color("surface", 238))
         else:
-            bg.setColorAt(0.0, QColor(14, 21, 22, 214))
-            bg.setColorAt(1.0, QColor(7, 11, 13, 224))
+            bg.setColorAt(0.0, theme.color("panel_mid", 214))
+            bg.setColorAt(1.0, theme.color("panel_bottom", 224))
         painter.fillPath(row_path, bg)
 
-        side = QColor(61, 237, 151) if pinned else QColor(13, 88, 55)
+        side = theme.color("accent") if pinned else theme.color("accent", 95)
         side.setAlpha(245 if pinned else 150)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(side)
         painter.drawRoundedRect(QRect(rect.left() + 9, rect.top() + 11, 4, rect.height() - 22), 2, 2)
-        border = QColor(82, 239, 164, 98) if pinned else QColor(132, 151, 148, 42)
+        border = theme.color("border_hover", 98) if pinned else theme.color("border", 42)
         painter.setPen(QPen(border, 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(row_path)
@@ -112,10 +114,10 @@ class TokenItemDelegate(QStyledItemDelegate):
         title_font = QFont("Segoe UI Variable Text", 10, QFont.Weight.Black)
         sub_font = QFont("Cascadia Mono", 7, QFont.Weight.Bold)
         painter.setFont(title_font)
-        painter.setPen(TEXT if enabled else QColor(135, 147, 145))
+        painter.setPen(theme.color("text") if enabled else theme.color("muted"))
         painter.drawText(QRect(text_left, rect.top() + 11, text_w, 19), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, QFontMetrics(title_font).elidedText(symbol, Qt.TextElideMode.ElideRight, text_w))
         painter.setFont(sub_font)
-        painter.setPen(QColor(159, 181, 176) if enabled else QColor(93, 106, 104))
+        painter.setPen(theme.color("text_soft") if enabled else theme.color("dim"))
         sub = short_address(address)
         painter.drawText(QRect(text_left, rect.top() + 34, text_w, 16), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, QFontMetrics(sub_font).elidedText(sub, Qt.TextElideMode.ElideRight, text_w))
 
@@ -123,7 +125,7 @@ class TokenItemDelegate(QStyledItemDelegate):
             threshold_rect = self.threshold_rect(rect)
             self._draw_threshold_shell(painter, threshold_rect)
         del_rect = self.action_rect(rect)
-        self._draw_action(painter, del_rect, "-", QColor(255, 91, 111))
+        self._draw_action(painter, del_rect, "-", theme.color("negative"))
         painter.restore()
 
     def editorEvent(self, event, model, option, index) -> bool:  # type: ignore[override]
@@ -153,8 +155,9 @@ class TokenItemDelegate(QStyledItemDelegate):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
     def _draw_threshold_shell(self, painter: QPainter, rect: QRect) -> None:
-        painter.setPen(QPen(QColor(82, 239, 164, 74), 1))
-        painter.setBrush(QColor(82, 239, 164, 12))
+        theme = active_theme()
+        painter.setPen(QPen(theme.color("accent", 74), 1))
+        painter.setBrush(theme.color("accent", 12))
         painter.drawRoundedRect(rect, 8, 8)
 
 
@@ -186,29 +189,30 @@ class ChainThresholdBar(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         rect = self.rect().adjusted(0, 1, 0, -1)
+        theme = active_theme()
 
         shell = QPainterPath()
         shell.addRoundedRect(QRectF(rect), 13, 13)
         shell_grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        shell_grad.setColorAt(0.0, QColor(7, 13, 14, 242))
-        shell_grad.setColorAt(0.55, QColor(12, 24, 23, 236))
-        shell_grad.setColorAt(1.0, QColor(5, 9, 11, 246))
+        shell_grad.setColorAt(0.0, theme.color("panel_bottom", 242))
+        shell_grad.setColorAt(0.55, theme.color("surface", 236))
+        shell_grad.setColorAt(1.0, theme.color("panel_mid", 246))
         painter.fillPath(shell, shell_grad)
-        painter.setPen(QPen(QColor(82, 239, 164, 72), 1))
+        painter.setPen(QPen(theme.color("accent", 72), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(shell)
 
         track = QRectF(rect.left() + 48, rect.top() + 12, rect.width() - 96, 6)
         center_x = track.center().x()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(18, 31, 32, 235))
+        painter.setBrush(theme.color("surface", 235))
         painter.drawRoundedRect(track, 3, 3)
 
         for i in range(15):
             t = i / 14
             x = track.left() + t * track.width()
             h = 10 if i in {0, 7, 14} else 6
-            c = QColor(82, 239, 164, 80 if i in {0, 7, 14} else 42)
+            c = theme.color("accent", 80 if i in {0, 7, 14} else 42)
             painter.setPen(QPen(c, 1))
             painter.drawLine(QPointF(x, track.center().y() - h / 2), QPointF(x, track.center().y() + h / 2))
 
@@ -216,31 +220,31 @@ class ChainThresholdBar(QWidget):
         left_active = QRectF(center_x - span, track.top(), span, track.height())
         right_active = QRectF(center_x, track.top(), span, track.height())
         red = QLinearGradient(left_active.topLeft(), left_active.topRight())
-        red.setColorAt(0, QColor(255, 82, 103, 35))
-        red.setColorAt(1, QColor(255, 82, 103, 150))
+        red.setColorAt(0, theme.color("negative", 35))
+        red.setColorAt(1, theme.color("negative", 150))
         green = QLinearGradient(right_active.topLeft(), right_active.topRight())
-        green.setColorAt(0, QColor(48, 235, 137, 150))
-        green.setColorAt(1, QColor(48, 235, 137, 35))
+        green.setColorAt(0, theme.color("positive", 150))
+        green.setColorAt(1, theme.color("positive", 35))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(red)
         painter.drawRoundedRect(left_active, 3, 3)
         painter.setBrush(green)
         painter.drawRoundedRect(right_active, 3, 3)
 
-        self._draw_handle(painter, center_x - span, track.center().y(), QColor(255, 82, 103))
-        self._draw_handle(painter, center_x + span, track.center().y(), QColor(48, 235, 137))
+        self._draw_handle(painter, center_x - span, track.center().y(), theme.color("negative"))
+        self._draw_handle(painter, center_x + span, track.center().y(), theme.color("positive"))
 
-        painter.setPen(QPen(QColor(236, 246, 242, 215), 1.2))
+        painter.setPen(QPen(theme.color("text", 215), 1.2))
         painter.drawLine(QPointF(center_x, rect.top() + 6), QPointF(center_x, rect.bottom() - 6))
         painter.setFont(QFont("Cascadia Mono", 7, QFont.Weight.Black))
-        painter.setPen(QColor(222, 239, 235))
+        painter.setPen(theme.color("text_soft"))
         painter.drawText(QRectF(center_x - 18, rect.top() + 1, 36, 11), Qt.AlignmentFlag.AlignCenter, "0")
-        painter.setPen(QColor(255, 120, 136, 170))
+        painter.setPen(theme.color("negative", 170))
         painter.drawText(QRectF(rect.left() + 9, rect.top() + 7, 36, 12), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "-100")
-        painter.setPen(QColor(104, 245, 170, 170))
+        painter.setPen(theme.color("positive", 170))
         painter.drawText(QRectF(rect.right() - 45, rect.top() + 7, 36, 12), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "+100")
         painter.setFont(QFont("Cascadia Mono", 8, QFont.Weight.Black))
-        painter.setPen(QColor(127, 250, 184))
+        painter.setPen(theme.color("accent_hover"))
         painter.drawText(QRectF(center_x - 32, rect.bottom() - 12, 64, 11), Qt.AlignmentFlag.AlignCenter, f"±{format_threshold_value(self._value)}%")
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -287,13 +291,14 @@ class EmbossCloseButton(QPushButton):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         rect = self.rect()
         hover = self.underMouse()
+        theme = active_theme()
         font = QFont("Segoe UI Variable Display", 17, QFont.Weight.Black)
         painter.setFont(font)
-        painter.setPen(QColor(0, 0, 0, 170))
+        painter.setPen(theme.color("shadow", 170))
         painter.drawText(rect.adjusted(1, 2, 1, 2), Qt.AlignmentFlag.AlignCenter, "×")
-        painter.setPen(QColor(255, 255, 255, 54))
+        painter.setPen(theme.color("text", 54))
         painter.drawText(rect.adjusted(-1, -1, -1, -1), Qt.AlignmentFlag.AlignCenter, "×")
-        painter.setPen(QColor(255, 124, 142) if hover else QColor(225, 241, 235))
+        painter.setPen(theme.color("negative") if hover else theme.color("text"))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "×")
 
 
@@ -316,6 +321,7 @@ class TokenDialog(QDialog):
         self._logo_loaders: dict[str, LogoLoader] = {}
         self._info_workers: dict[str, TokenInfoWorker] = {}
         self._threshold_edits: list[QLineEdit] = []
+        self._theme = active_theme()
 
         self.list_widget = QListWidget(self)
         self.list_widget.setGeometry(12, 124, 306, 268)
@@ -354,6 +360,13 @@ class TokenDialog(QDialog):
         self._preload_logos()
         self._refresh_list()
 
+    def set_theme(self, skin: str) -> None:
+        self._theme = get_theme(skin)
+        self._apply_styles()
+        self._refresh_list()
+        self.threshold_bar.update()
+        self.update()
+
     @property
     def tokens(self) -> list[dict[str, Any]]:
         clean: list[dict[str, Any]] = []
@@ -382,22 +395,22 @@ class TokenDialog(QDialog):
         path = QPainterPath()
         path.addRoundedRect(QRectF(rect), 20, 20)
         grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        grad.setColorAt(0.0, PANEL_BG_TOP)
-        grad.setColorAt(0.5, PANEL_BG_MID)
-        grad.setColorAt(1.0, PANEL_BG_BOTTOM)
+        grad.setColorAt(0.0, self._theme.color("panel_top"))
+        grad.setColorAt(0.5, self._theme.color("panel_mid"))
+        grad.setColorAt(1.0, self._theme.color("panel_bottom"))
         painter.fillPath(path, grad)
-        painter.setPen(QPen(QColor(132, 151, 148, 72), 1.05))
+        painter.setPen(QPen(self._theme.color("border", 72), 1.05))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
         banner = QRect(14, 14, 302, 34)
         banner_path = QPainterPath()
         banner_path.addRoundedRect(QRectF(banner), 13, 13)
         banner_grad = QLinearGradient(banner.topLeft(), banner.bottomRight())
-        banner_grad.setColorAt(0, QColor(18, 36, 32, 232))
-        banner_grad.setColorAt(1, QColor(9, 18, 20, 238))
+        banner_grad.setColorAt(0, self._theme.color("surface_soft", 232))
+        banner_grad.setColorAt(1, self._theme.color("surface", 238))
         painter.fillPath(banner_path, banner_grad)
         painter.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.Black))
-        painter.setPen(TEXT)
+        painter.setPen(self._theme.color("text"))
         painter.drawText(banner.adjusted(12, 0, -46, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "CA 监控")
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -652,71 +665,100 @@ class TokenDialog(QDialog):
         return 1.0
 
     def _apply_styles(self) -> None:
+        theme = self._theme
         self.list_widget.setStyleSheet("""
             QListWidget { background: transparent; border: 0; outline: 0; }
             QListWidget::item { min-height: 56px; border: 0; }
             QListWidget::item:selected { background: transparent; }
         """)
         self.address_edit.setStyleSheet("""
-            QLineEdit {
-                background: rgba(8, 13, 15, 242);
-                color: #effbf6;
-                border: 1px solid rgba(132,151,148,76);
+            QLineEdit {{
+                background: {field_bg};
+                color: {text};
+                border: 1px solid {border};
                 border-radius: 12px;
                 padding: 8px 10px;
                 font: 700 12px "Cascadia Mono";
-                selection-background-color: #1f7f59;
-            }
-            QLineEdit:focus {
-                border: 1px solid rgba(82,239,164,150);
-                background: rgba(12, 19, 20, 246);
-            }
-        """)
+                selection-background-color: {selection};
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {focus_border};
+                background: {field_focus};
+            }}
+        """.format(
+            field_bg=rgba(theme.field_bg, 242),
+            text=hex_rgb(theme.text),
+            border=rgba(theme.border, 76),
+            selection=rgba(theme.accent, 145),
+            focus_border=rgba(theme.border_hover, 150),
+            field_focus=rgba(theme.field_focus, 246),
+        ))
         self.add_button.setStyleSheet("""
-            QPushButton {
-                background: #39d88f;
-                color: #06120d;
-                border: 1px solid rgba(103,255,184,94);
+            QPushButton {{
+                background: {accent};
+                color: {accent_text};
+                border: 1px solid {border};
                 border-radius: 12px;
                 font: 900 13px "Microsoft YaHei UI";
-            }
-            QPushButton:hover { background: #52eba5; }
-        """)
+            }}
+            QPushButton:hover {{ background: {accent_hover}; }}
+        """.format(
+            accent=hex_rgb(theme.accent),
+            accent_text=hex_rgb(theme.accent_text),
+            border=rgba(theme.accent_hover, 94),
+            accent_hover=hex_rgb(theme.accent_hover),
+        ))
         self.sync_button.setStyleSheet("""
-            QPushButton {
-                background: rgba(18, 31, 32, 238);
-                color: #bdf7dc;
-                border: 1px solid rgba(82,239,164,76);
+            QPushButton {{
+                background: {surface};
+                color: {accent_hover};
+                border: 1px solid {border};
                 border-radius: 12px;
                 font: 900 12px "Microsoft YaHei UI";
-            }
-            QPushButton:hover {
-                background: rgba(31, 127, 89, 185);
-                color: #effbf6;
-                border: 1px solid rgba(103,255,184,130);
-            }
-            QPushButton:pressed {
-                background: rgba(17, 95, 66, 210);
+            }}
+            QPushButton:hover {{
+                background: {hover_bg};
+                color: {text};
+                border: 1px solid {hover_border};
+            }}
+            QPushButton:pressed {{
+                background: {pressed_bg};
                 padding-top: 1px;
-            }
-        """)
+            }}
+        """.format(
+            surface=rgba(theme.surface, 238),
+            accent_hover=hex_rgb(theme.accent_hover),
+            border=rgba(theme.accent, 76),
+            hover_bg=rgba(theme.accent, 58),
+            text=hex_rgb(theme.text),
+            hover_border=rgba(theme.accent_hover, 130),
+            pressed_bg=rgba(theme.accent, 84),
+        ))
 
     def _threshold_edit_css(self) -> str:
+        theme = self._theme
         return """
-            QLineEdit {
-                background: rgba(10, 17, 18, 245);
-                color: #78f5b0;
-                border: 1px solid rgba(82,239,164,105);
+            QLineEdit {{
+                background: {field_bg};
+                color: {accent_hover};
+                border: 1px solid {border};
                 border-radius: 7px;
                 padding: 1px 3px;
                 font: 800 8px "Cascadia Mono";
-                selection-background-color: #1f7f59;
-            }
-            QLineEdit:focus {
-                background: rgba(14, 25, 24, 248);
-                border: 1px solid rgba(103,255,184,165);
-            }
-        """
+                selection-background-color: {selection};
+            }}
+            QLineEdit:focus {{
+                background: {field_focus};
+                border: 1px solid {focus_border};
+            }}
+        """.format(
+            field_bg=rgba(theme.field_bg, 245),
+            accent_hover=hex_rgb(theme.accent_hover),
+            border=rgba(theme.accent, 105),
+            selection=rgba(theme.accent, 145),
+            field_focus=rgba(theme.field_focus, 248),
+            focus_border=rgba(theme.accent_hover, 165),
+        )
 
 
 def short_address(address: str) -> str:

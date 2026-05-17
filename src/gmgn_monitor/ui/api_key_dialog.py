@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gmgn_monitor.ui.theme import active_theme, get_theme, hex_rgb, rgba
+
 
 GMGN_API_KEY_URL = "https://gmgn.ai/ai"
 
@@ -30,80 +32,7 @@ class ApiKeyDialog(QDialog):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setStyleSheet(
-            """
-            QDialog {
-                background: transparent;
-                border-radius: 18px;
-            }
-            QLabel#title {
-                color: #f2fbf7;
-                font: 800 20px "Microsoft YaHei UI";
-            }
-            QLabel#hint {
-                color: #9badab;
-                font: 600 11px "Microsoft YaHei UI";
-                line-height: 150%;
-            }
-            QLineEdit {
-                background: rgba(14, 22, 24, 245);
-                color: #eef8f4;
-                border: 1px solid rgba(92, 255, 181, 86);
-                border-radius: 12px;
-                padding: 9px 11px;
-                font: 700 12px "Cascadia Mono";
-                selection-color: #07100d;
-                selection-background-color: #55e99f;
-            }
-            QLineEdit:focus {
-                border: 1px solid rgba(92, 255, 181, 180);
-                background: rgba(21, 32, 34, 250);
-            }
-            QCheckBox {
-                color: #9fb2ad;
-                font: 700 10px "Microsoft YaHei UI";
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border-radius: 4px;
-                border: 1px solid rgba(255,255,255,56);
-                background: rgba(255,255,255,10);
-            }
-            QCheckBox::indicator:checked {
-                background: #42e395;
-                border: 1px solid #42e395;
-            }
-            QPushButton {
-                border-radius: 11px;
-                border: 1px solid rgba(255,255,255,28);
-                color: #dce9e5;
-                background: rgba(255,255,255,13);
-                font: 800 12px "Microsoft YaHei UI";
-                padding: 8px 13px;
-            }
-            QPushButton:hover {
-                background: rgba(255,255,255,18);
-                color: #ffffff;
-            }
-            QPushButton#primary {
-                border: 1px solid rgba(103,255,184,92);
-                color: #06120d;
-                background: #39d88f;
-            }
-            QPushButton#primary:hover {
-                background: #52eba5;
-            }
-            QPushButton#link {
-                border: 1px solid rgba(80, 178, 255, 80);
-                color: #bde4ff;
-                background: rgba(32, 113, 183, 36);
-            }
-            QPushButton#link:hover {
-                background: rgba(32, 113, 183, 62);
-            }
-            """
-        )
+        self._theme = active_theme()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 30, 32, 28)
@@ -157,6 +86,106 @@ class ApiKeyDialog(QDialog):
         self.save_button.clicked.connect(self._accept_if_valid)
         actions.addWidget(self.save_button)
         layout.addLayout(actions)
+        self._apply_styles()
+
+    def set_theme(self, skin: str) -> None:
+        self._theme = get_theme(skin)
+        self._apply_styles()
+        self.update()
+
+    def _apply_styles(self) -> None:
+        theme = self._theme
+        self.setStyleSheet("""
+            QDialog {{
+                background: transparent;
+                border-radius: 18px;
+            }}
+            QLabel#title {{
+                color: {text};
+                font: 800 20px "Microsoft YaHei UI";
+            }}
+            QLabel#hint {{
+                color: {muted};
+                font: 600 11px "Microsoft YaHei UI";
+                line-height: 150%;
+            }}
+            QLineEdit {{
+                background: {field_bg};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 12px;
+                padding: 9px 11px;
+                font: 700 12px "Cascadia Mono";
+                selection-color: {accent_text};
+                selection-background-color: {accent};
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {focus_border};
+                background: {field_focus};
+            }}
+            QCheckBox {{
+                color: {muted};
+                font: 700 10px "Microsoft YaHei UI";
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+                border-radius: 4px;
+                border: 1px solid {border};
+                background: {surface};
+            }}
+            QCheckBox::indicator:checked {{
+                background: {accent};
+                border: 1px solid {accent};
+            }}
+            QPushButton {{
+                border-radius: 11px;
+                border: 1px solid {button_border};
+                color: {text_soft};
+                background: {button_bg};
+                font: 800 12px "Microsoft YaHei UI";
+                padding: 8px 13px;
+            }}
+            QPushButton:hover {{
+                background: {button_hover};
+                color: {text};
+            }}
+            QPushButton#primary {{
+                border: 1px solid {focus_border};
+                color: {accent_text};
+                background: {accent};
+            }}
+            QPushButton#primary:hover {{
+                background: {accent_hover};
+            }}
+            QPushButton#link {{
+                border: 1px solid {info_border};
+                color: {info};
+                background: {info_bg};
+            }}
+            QPushButton#link:hover {{
+                background: {info_hover};
+            }}
+        """.format(
+            text=hex_rgb(theme.text),
+            muted=hex_rgb(theme.muted),
+            field_bg=rgba(theme.field_bg, 245),
+            border=rgba(theme.border, 86),
+            focus_border=rgba(theme.border_hover, 180),
+            field_focus=rgba(theme.field_focus, 250),
+            accent_text=hex_rgb(theme.accent_text),
+            accent=hex_rgb(theme.accent),
+            surface=rgba(theme.surface, 130),
+            button_border=rgba(theme.border, 58),
+            text_soft=hex_rgb(theme.text_soft),
+            button_bg=rgba(theme.surface, 165),
+            button_hover=rgba(theme.surface_soft, 220),
+            accent_hover=hex_rgb(theme.accent_hover),
+            info_border=rgba(theme.info, 88),
+            info=hex_rgb(theme.info),
+            info_bg=rgba(theme.info, 38),
+            info_hover=rgba(theme.info, 65),
+        ))
 
     @property
     def api_key(self) -> str:
@@ -196,23 +225,23 @@ class ApiKeyDialog(QDialog):
         rect = self.rect().adjusted(8, 8, -8, -8)
         shadow = rect.adjusted(0, 10, 0, 10)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 112))
+        painter.setBrush(self._theme.color("shadow", 112))
         painter.drawRoundedRect(shadow, 22, 22)
 
         path = QPainterPath()
         path.addRoundedRect(rect, 22, 22)
         base = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        base.setColorAt(0.0, QColor(18, 27, 27, 250))
-        base.setColorAt(0.50, QColor(8, 13, 15, 248))
-        base.setColorAt(1.0, QColor(4, 7, 9, 252))
+        base.setColorAt(0.0, self._theme.color("panel_top"))
+        base.setColorAt(0.50, self._theme.color("panel_mid"))
+        base.setColorAt(1.0, self._theme.color("panel_bottom"))
         painter.fillPath(path, base)
 
         glow = QLinearGradient(rect.topLeft(), rect.topRight())
-        glow.setColorAt(0.0, QColor(42, 226, 144, 28))
-        glow.setColorAt(0.36, QColor(42, 226, 144, 8))
-        glow.setColorAt(1.0, QColor(42, 226, 144, 0))
+        glow.setColorAt(0.0, self._theme.color("accent", 28))
+        glow.setColorAt(0.36, self._theme.color("accent", 8))
+        glow.setColorAt(1.0, self._theme.color("accent", 0))
         painter.fillPath(path, glow)
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(132, 151, 148, 82), 1.05))
+        painter.setPen(QPen(self._theme.color("border", 82), 1.05))
         painter.drawPath(path)

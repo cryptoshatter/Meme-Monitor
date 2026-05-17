@@ -79,6 +79,7 @@ class MarketWorker(QThread):
         self._next_token_index = 0
         self._token_snapshots: dict[str, TokenSnapshot] = {}
         self._token_alert_baselines: dict[str, TokenSnapshot] = {}
+        self._token_alert_origin_baselines: dict[str, TokenSnapshot] = {}
         self._token_alert_thresholds: dict[str, float | None] = {}
         self._last_token_alert_key: dict[str, str] = {}
 
@@ -287,37 +288,64 @@ class MarketWorker(QThread):
         threshold = token_alert_threshold(token)
         if threshold is None:
             self._token_alert_baselines.pop(key, None)
+            self._token_alert_origin_baselines.pop(key, None)
             self._token_alert_thresholds[key] = None
             self._last_token_alert_key.pop(key, None)
             return
         if self._token_alert_thresholds.get(key) != threshold:
             self._token_alert_thresholds[key] = threshold
             self._token_alert_baselines[key] = snap
+            self._token_alert_origin_baselines[key] = snap
             self._last_token_alert_key.pop(key, None)
+            self._emit_token_alert(snap, 0.0, threshold, triggered=False)
             return
         baseline = self._token_alert_baselines.get(key)
         if baseline is None:
             self._token_alert_baselines[key] = snap
+            self._token_alert_origin_baselines[key] = snap
+            self._emit_token_alert(snap, 0.0, threshold, triggered=False)
             return
-        delta = token_delta_percent(baseline, snap)
-        if delta is None or abs(delta) < threshold:
+        origin = self._token_alert_origin_baselines.get(key)
+        if origin is None:
+            origin = baseline
+            self._token_alert_origin_baselines[key] = origin
+        display_delta = token_delta_percent(origin, snap)
+        trigger_delta = token_delta_percent(baseline, snap)
+        if display_delta is None or trigger_delta is None:
             return
-        alert_key = f"{format_alert_value(snap.market_cap or snap.price)}:{delta:.2f}"
+        if abs(trigger_delta) < threshold:
+            self._emit_token_alert(snap, display_delta, threshold, triggered=False)
+            return
+        alert_key = f"{format_alert_value(snap.market_cap or snap.price)}:{trigger_delta:.2f}"
         if self._last_token_alert_key.get(key) == alert_key:
             return
         self._last_token_alert_key[key] = alert_key
+        self._token_alert_baselines[key] = snap
+        self._emit_token_alert(snap, display_delta, threshold, triggered=True, trigger_delta=trigger_delta)
+
+    def _emit_token_alert(
+        self,
+        snap: TokenSnapshot,
+        display_delta: float,
+        threshold: float,
+        *,
+        triggered: bool,
+        trigger_delta: float | None = None,
+    ) -> None:
         self.token_alert.emit(
             {
                 "chain": snap.chain,
                 "address": snap.address,
                 "symbol": snap.symbol,
                 "logo_url": snap.logo_url,
-                "delta_percent": delta,
+                "delta_percent": display_delta,
+                "trigger_delta_percent": trigger_delta,
                 "threshold_percent": threshold,
                 "market_cap": snap.market_cap,
                 "price": snap.price,
                 "change_percent": snap.change_percent,
                 "received_at": snap.received_at,
+                "triggered": triggered,
             }
         )
 
@@ -562,12 +590,15 @@ class MarketWorker(QThread):
         for key in list(self._token_alert_baselines):
             if key not in active_thresholds or active_thresholds[key] is None:
                 self._token_alert_baselines.pop(key, None)
+                self._token_alert_origin_baselines.pop(key, None)
         for key, threshold in active_thresholds.items():
             previous = self._token_alert_thresholds.get(key)
             if threshold is None:
                 self._token_alert_baselines.pop(key, None)
+                self._token_alert_origin_baselines.pop(key, None)
             elif previous != threshold:
                 self._token_alert_baselines.pop(key, None)
+                self._token_alert_origin_baselines.pop(key, None)
                 self._last_token_alert_key.pop(key, None)
         self._token_alert_thresholds = active_thresholds
 
