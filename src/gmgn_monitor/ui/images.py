@@ -186,6 +186,8 @@ def avatar_pixmap(kind: str, value: str, size: int = 18) -> QPixmap:
     value = (value or "\U0001f9e9").strip()
     if kind == "image" and value:
         try:
+            if value.startswith(("http://", "https://")):
+                return emoji_avatar("\U0001f4a0", size)
             return _pixmap_from_local_image_cached(value, size)
         except Exception as exc:
             LOG.info("avatar image load failed: %s", exc)

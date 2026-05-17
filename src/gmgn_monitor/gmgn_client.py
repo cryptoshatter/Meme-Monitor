@@ -68,6 +68,7 @@ CHAIN_NATIVE_ALIASES: dict[str, set[str]] = {
     "base": {"eth", "weth"},
     "bsc": {"bnb", "wbnb"},
 }
+DEFAULT_KOL_AVATAR = "\U0001f4a0"
 
 
 class GmgnOpenApiClient:
@@ -126,6 +127,50 @@ class GmgnOpenApiClient:
                 "hide_closed": "true",
             },
         )
+
+    def get_kol_wallets(self, chain: str, limit: int = 100) -> list[dict[str, Any]]:
+        data = self._normal_get(
+            "/v1/user/kol",
+            {
+                "chain": chain,
+                "limit": max(1, min(int(limit), 500)),
+            },
+            timeout=(2.4, 4.2),
+            retry_network_once=True,
+        )
+        return parse_kol_wallets(chain, data)
+
+    def get_smartmoney_wallets(self, chain: str, limit: int = 100) -> list[dict[str, Any]]:
+        data = self._normal_get(
+            "/v1/user/smartmoney",
+            {
+                "chain": chain,
+                "limit": max(1, min(int(limit), 500)),
+            },
+            timeout=(2.4, 4.2),
+            retry_network_once=True,
+        )
+        return parse_kol_wallets(chain, data)
+
+    def search_kol_wallets(self, query: str, chain: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        query = str(query or "").lower().strip()
+        chains = [chain] if chain else list(SUPPORTED_CHAINS)
+        matches: list[dict[str, Any]] = []
+        for item_chain in chains:
+            for wallet in self.get_kol_wallets(item_chain, limit=limit):
+                haystack = " ".join(
+                    [
+                        str(wallet.get("remark") or ""),
+                        str(wallet.get("twitter_username") or ""),
+                        str(wallet.get("twitter_name") or ""),
+                        " ".join(str(tag) for tag in wallet.get("tags", []) if str(tag).strip()),
+                        str(wallet.get("address") or ""),
+                    ]
+                ).lower()
+                if not query or query in haystack:
+                    matches.append(wallet)
+        matches.sort(key=lambda item: _kol_match_score(query, item), reverse=True)
+        return matches
 
     def get_latest_wallet_activity(
         self,
@@ -373,6 +418,94 @@ def parse_wallet_activity_snapshot(
         raw=item,
         received_at=time.time(),
     )
+
+
+def parse_kol_wallets(chain: str, data: dict[str, Any]) -> list[dict[str, Any]]:
+    wallets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in _extract_dict_list(data, ["list", "items", "records", "kol"]):
+        maker_info = item.get("maker_info") if isinstance(item.get("maker_info"), dict) else {}
+        common = item.get("common") if isinstance(item.get("common"), dict) else {}
+        base = maker_info or common or item
+        address = _clean_chain_address(
+            base.get("address")
+            or base.get("wallet_address")
+            or item.get("maker")
+            or item.get("wallet")
+            or item.get("address")
+        )
+        if not address:
+            continue
+        key = f"{chain}:{address.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        name = _kol_display_name(base)
+        if not name:
+            name = short_address_for_identity(address)
+        avatar = str(base.get("avatar") or base.get("avatar_url") or base.get("image") or "").strip()
+        wallets.append(
+            {
+                "remark": name,
+                "address": address,
+                "chain": str(item.get("chain") or chain).lower().strip() or chain,
+                "chains": [str(item.get("chain") or chain).lower().strip() or chain],
+                "avatar_kind": "image" if avatar else "emoji",
+                "avatar_value": avatar or DEFAULT_KOL_AVATAR,
+                "twitter_username": str(base.get("twitter_username") or "").strip(),
+                "twitter_name": str(base.get("twitter_name") or "").strip(),
+                "tags": _kol_tags(base),
+            }
+        )
+    return wallets
+
+
+def _kol_tags(common: dict[str, Any]) -> list[str]:
+    raw_tags = common.get("tags")
+    if isinstance(raw_tags, list):
+        tags = [str(tag).lower().strip() for tag in raw_tags if str(tag).strip()]
+    elif isinstance(raw_tags, str):
+        tags = [part.lower().strip() for part in raw_tags.split(",") if part.strip()]
+    else:
+        tags = []
+    primary = str(common.get("tag") or "").lower().strip()
+    if primary and primary not in tags:
+        tags.insert(0, primary)
+    return tags
+
+
+def _kol_display_name(common: dict[str, Any]) -> str:
+    for key in ("name", "twitter_name", "ens"):
+        value = str(common.get(key) or "").strip()
+        if value:
+            return value[:28]
+    username = str(common.get("twitter_username") or "").strip().lstrip("@")
+    if username:
+        return f"@{username}"[:28]
+    return ""
+
+
+def _kol_match_score(query: str, item: dict[str, Any]) -> int:
+    if not query:
+        return 0
+    name = str(item.get("remark") or "").lower()
+    twitter = str(item.get("twitter_username") or "").lower().lstrip("@")
+    address = str(item.get("address") or "").lower()
+    if query == name or query == twitter:
+        return 100
+    if name.startswith(query) or twitter.startswith(query):
+        return 80
+    if query in name or query in twitter:
+        return 60
+    if query in address:
+        return 30
+    return 0
+
+
+def short_address_for_identity(address: str) -> str:
+    if len(address) <= 12:
+        return address
+    return f"{address[:6]}...{address[-4:]}"
 
 
 def _extract_token_logo_url(item: dict[str, Any]) -> str:

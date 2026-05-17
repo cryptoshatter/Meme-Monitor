@@ -232,9 +232,10 @@ class MonitorApp:
             self.wallet_dialog.raise_()
             self.wallet_dialog.activateWindow()
             return
-        dialog = WalletDialog(self.config.wallets or [], self.card)
+        dialog = WalletDialog(self.config.wallets or [], self.config.api_key(), self.config.api_host, self.card)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        dialog.accepted.connect(lambda dialog=dialog: self._apply_wallet_dialog(dialog))
+        dialog.wallets_changed.connect(self._save_wallet_list)
+        dialog.accepted.connect(lambda dialog=dialog: self._save_wallet_list(dialog.wallets))
         dialog.finished.connect(lambda _result: self._clear_wallet_dialog(dialog))
         self.wallet_dialog = dialog
         dialog.show()
@@ -246,7 +247,12 @@ class MonitorApp:
             self.wallet_dialog = None
 
     def _apply_wallet_dialog(self, dialog: WalletDialog) -> None:
-        wallets = [wallet for wallet in dialog.wallets if wallet.get("address", "").strip()]
+        self._save_wallet_list(dialog.wallets)
+
+    def _save_wallet_list(self, raw_wallets: object) -> None:
+        if not isinstance(raw_wallets, list):
+            return
+        wallets = [wallet for wallet in raw_wallets if isinstance(wallet, dict) and str(wallet.get("address", "")).strip()]
         if not wallets:
             self.config.wallets = []
             self.config.save()
@@ -255,29 +261,21 @@ class MonitorApp:
                 self.worker.update_wallets([])
             return
 
-        self.card.set_status("Detecting")
         normalized_wallets: list[dict[str, object]] = []
         invalid: list[str] = []
-        undetected: list[str] = []
         for wallet in wallets:
             wallet = normalize_wallet(wallet)
             if not is_valid_wallet_address(wallet["address"]):
                 invalid.append(wallet["remark"])
                 continue
-            detected_chains = self._detect_wallet_chains(wallet["address"], str(wallet.get("chain") or ""))
-            if not detected_chains:
-                undetected.append(wallet["remark"])
-                continue
+            detected_chains = possible_wallet_chains(str(wallet["address"]), str(wallet.get("chain") or ""))
             wallet["chains"] = detected_chains
-            wallet["chain"] = detected_chains[0]
+            wallet["chain"] = detected_chains[0] if detected_chains else str(wallet.get("chain") or "")
             normalized_wallets.append(wallet)
 
-        if invalid or undetected:
+        if invalid:
             parts = []
-            if invalid:
-                parts.append("地址格式不正确: " + ", ".join(invalid))
-            if undetected:
-                parts.append("未识别链: " + ", ".join(undetected))
+            parts.append("地址格式不正确: " + ", ".join(invalid))
             QMessageBox.warning(self.card, "钱包监控", "\n".join(parts))
             self.card.set_status("Live")
             return
