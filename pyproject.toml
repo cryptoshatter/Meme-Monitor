@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gmgn-meme-monitor"
-version = "1.0.2"
+version = "1.0.3"
 description = "GMGN Meme coin realtime desktop floating monitor"
 requires-python = ">=3.10"
 dependencies = [

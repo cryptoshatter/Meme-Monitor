@@ -14,7 +14,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtSvg import QSvgRenderer
 
 LOG = logging.getLogger(__name__)
-_FAILED_LOGOS: dict[tuple[str, int], float] = {}
+_FAILED_LOGOS: dict[str, float] = {}
 _CHAIN_SVG_FILES = {
     "sol": "sol.svg",
     "solana": "sol.svg",
@@ -48,14 +48,15 @@ class LogoLoader(QThread):
 def pixmap_from_url(url: str, size: int = 54) -> QPixmap:
     if not url:
         return QPixmap()
-    failed_until = _FAILED_LOGOS.get((url, size), 0.0)
+    key = url.strip()
+    failed_until = _FAILED_LOGOS.get(key, 0.0)
     if failed_until > time.monotonic():
         return QPixmap()
     try:
         return _pixmap_from_url_cached(url, size)
     except Exception as exc:
         LOG.info("logo download failed: %s", exc)
-        _FAILED_LOGOS[(url, size)] = time.monotonic() + 300.0
+        _FAILED_LOGOS[key] = time.monotonic() + 300.0
         return QPixmap()
 
 
@@ -133,6 +134,7 @@ def _pil_to_pixmap(image: Image.Image) -> QPixmap:
     return QPixmap.fromImage(qimage)
 
 
+@lru_cache(maxsize=16)
 def fallback_logo(size: int = 54) -> QPixmap:
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
@@ -152,6 +154,7 @@ def fallback_logo(size: int = 54) -> QPixmap:
     return pix
 
 
+@lru_cache(maxsize=128)
 def token_fallback_logo(symbol: str = "", chain: str = "", size: int = 54) -> QPixmap:
     seed = sum(ord(char) for char in (symbol or chain or "GMGN"))
     palettes = (
@@ -349,6 +352,9 @@ def _chain_svg_icon(chain: str, size: int) -> QPixmap:
 
 
 def clear_icon_caches() -> None:
+    _FAILED_LOGOS.clear()
+    fallback_logo.cache_clear()
+    token_fallback_logo.cache_clear()
     native_icon.cache_clear()
     _chain_svg_icon.cache_clear()
 

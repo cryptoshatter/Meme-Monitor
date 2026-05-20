@@ -10,6 +10,7 @@ from PySide6.QtCore import QMutex, QThread, Signal
 from .gmgn_client import GmgnApiError, GmgnOpenApiClient, TokenSnapshot, possible_wallet_chains
 
 LOG = logging.getLogger(__name__)
+WALLET_ACTIVITY_STARTUP_GRACE_SECONDS = 180
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class MarketWorker(QThread):
     snapshot = Signal(object)
     wallet_activity = Signal(object)
     token_alert = Signal(object)
+    token_risk = Signal(object)
     status = Signal(str)
     error = Signal(str)
 
@@ -65,8 +67,9 @@ class MarketWorker(QThread):
         )
         self._mutex = QMutex()
         self._running = True
+        self._started_at = time.time()
         self._last_price: float | None = None
-        self._last_wallet_key = ""
+        self._last_wallet_event_keys: dict[str, str] = {}
         self._last_wallet_poll = 0.0
         self._next_wallet_index = 0
         self._next_wallet_chain_index: dict[str, int] = {}
@@ -82,6 +85,9 @@ class MarketWorker(QThread):
         self._token_alert_origin_baselines: dict[str, TokenSnapshot] = {}
         self._token_alert_thresholds: dict[str, float | None] = {}
         self._last_token_alert_key: dict[str, str] = {}
+        self._last_token_snapshot_by_key: dict[str, TokenSnapshot] = {}
+        self._last_token_risk_poll = 0.0
+        self._last_token_risk_key = ""
 
     def update_token(self, chain: str, address: str) -> None:
         self._mutex.lock()
@@ -132,7 +138,7 @@ class MarketWorker(QThread):
         self._mutex.lock()
         try:
             self._state.wallets = self._normalize_wallets(wallets)
-            self._last_wallet_key = ""
+            self._last_wallet_event_keys = {}
             self._last_wallet_poll = 0.0
             self._next_wallet_index = 0
             self._next_wallet_chain_index = {}
@@ -191,17 +197,19 @@ class MarketWorker(QThread):
             if not running:
                 return
             if state.paused:
-                self.msleep(200)
+                self.msleep(180)
                 continue
 
             try:
                 snap = client.get_token_info(state.chain, state.address)
-                snap = self._with_local_change(snap)
-                self.snapshot.emit(snap)
-                self.status.emit("Live")
+                if f"{snap.chain}:{snap.address}".lower() == f"{state.chain}:{state.address}".lower():
+                    snap = self._with_local_change(snap)
+                    self._last_token_snapshot_by_key[f"{snap.chain}:{snap.address}".lower()] = snap
+                    self.snapshot.emit(snap)
+                    self.status.emit("Live")
+                    self._poll_risk_if_due(client, snap)
             except GmgnApiError as exc:
                 LOG.warning("GMGN API error: %s", exc)
-                self.error.emit(str(exc))
                 self._sleep_interruptible(self._error_wait_ms(exc, state.interval_ms))
                 continue
             except Exception as exc:
@@ -223,6 +231,19 @@ class MarketWorker(QThread):
                 self.error.emit(str(exc))
 
             self._sleep_interruptible(state.interval_ms)
+
+    def _poll_risk_if_due(self, client: GmgnOpenApiClient, snap: TokenSnapshot) -> None:
+        key = f"{snap.chain}:{snap.address}".lower()
+        now = time.monotonic()
+        if key == self._last_token_risk_key and (now - self._last_token_risk_poll) < 120.0:
+            return
+        self._last_token_risk_key = key
+        self._last_token_risk_poll = now
+        try:
+            tags = client.get_token_risk_tags(snap.chain, snap.address)
+        except Exception:
+            tags = ["风险未知"]
+        self.token_risk.emit({"chain": snap.chain, "address": snap.address, "tags": tags or ["风险未知"]})
 
     def _copy_state(self) -> tuple[bool, WorkerState]:
         self._mutex.lock()
@@ -284,6 +305,8 @@ class MarketWorker(QThread):
             return
         snap = client.get_token_info(chain, address)
         key = f"{snap.chain}:{snap.address}".lower()
+        previous_snap = self._last_token_snapshot_by_key.get(key)
+        self._last_token_snapshot_by_key[key] = snap
         self._token_snapshots[key] = snap
         threshold = token_alert_threshold(token)
         if threshold is None:
@@ -321,7 +344,8 @@ class MarketWorker(QThread):
             return
         self._last_token_alert_key[key] = alert_key
         self._token_alert_baselines[key] = snap
-        self._emit_token_alert(snap, display_delta, threshold, triggered=True, trigger_delta=trigger_delta)
+        reason = self._token_alert_reason(snap, trigger_delta, previous_snap)
+        self._emit_token_alert(snap, display_delta, threshold, triggered=True, trigger_delta=trigger_delta, reason=reason)
 
     def _emit_token_alert(
         self,
@@ -331,6 +355,7 @@ class MarketWorker(QThread):
         *,
         triggered: bool,
         trigger_delta: float | None = None,
+        reason: str = "",
     ) -> None:
         self.token_alert.emit(
             {
@@ -344,10 +369,29 @@ class MarketWorker(QThread):
                 "market_cap": snap.market_cap,
                 "price": snap.price,
                 "change_percent": snap.change_percent,
+                "volume_24h": snap.volume_24h,
                 "received_at": snap.received_at,
                 "triggered": triggered,
+                "reason": reason or "市值突破阈值",
             }
         )
+
+    def _token_alert_reason(self, snap: TokenSnapshot, trigger_delta: float | None, previous_snap: TokenSnapshot | None) -> str:
+        key = f"{snap.chain}:{snap.address}".lower()
+        now = time.time()
+        for wallet_snap in sorted(self._wallet_snapshots.values(), key=lambda item: getattr(item, "timestamp", None) or 0, reverse=True):
+            token_key_value = f"{getattr(wallet_snap, 'chain', '')}:{getattr(wallet_snap, 'token_address', '')}".lower()
+            timestamp = getattr(wallet_snap, "timestamp", None) or 0
+            if token_key_value == key and timestamp and now - timestamp <= 300:
+                side = "买入" if getattr(wallet_snap, "side", "") == "buy" else "卖出"
+                remark = str(getattr(wallet_snap, "remark", "") or "钱包")
+                return f"{remark}{side}"
+        if previous_snap and previous_snap.volume_24h and snap.volume_24h:
+            if snap.volume_24h >= previous_snap.volume_24h * 1.12:
+                return "成交放大"
+        if trigger_delta is not None:
+            return "上涨突破" if trigger_delta >= 0 else "下跌突破"
+        return "市值突破阈值"
 
     def _poll_wallet_if_due(self, client: GmgnOpenApiClient, state: WorkerState) -> None:
         wallets = state.wallets or []
@@ -387,27 +431,14 @@ class MarketWorker(QThread):
                     str(wallet.get("remark") or "Wallet"),
                     wallet.get("avatar_kind", "emoji"),
                     wallet.get("avatar_value", ""),
-                )
-                LOG.info(
-                    "wallet activity result chain=%s address=%s side=%s token=%s ca=%s amount=%s%s ts=%s tx=%s",
-                    snap.chain,
-                    snap.wallet_address.lower(),
-                    snap.side,
-                    snap.token_symbol,
-                    getattr(snap, "token_address", ""),
-                    snap.native_amount,
-                    snap.native_symbol,
-                    snap.timestamp,
-                    short_tx(snap.tx_hash),
+                    group=str(wallet.get("group") or "默认"),
                 )
                 if snap.side:
                     self._log_wallet_fetch(snap)
                     snapshots.append(snap)
             except GmgnApiError as exc:
                 LOG.warning("GMGN wallet activity error: %s", exc)
-                if exc.status == 429:
-                    self.error.emit(str(exc))
-                    retry_delay_ms = max(retry_delay_ms, self._error_wait_ms(exc, state.interval_ms))
+                retry_delay_ms = max(retry_delay_ms, self._error_wait_ms(exc, state.interval_ms))
                 continue
             except Exception as exc:
                 LOG.exception("Unexpected wallet activity error")
@@ -418,40 +449,76 @@ class MarketWorker(QThread):
         if not snapshots:
             return
 
+        fresh_snapshots = []
         for snap in snapshots:
             wallet_key = f"{snap.chain}:{snap.wallet_address.lower()}"
             self._wallet_snapshots[wallet_key] = snap
             if getattr(snap, "side", ""):
                 self._wallet_primary_chain[wallet_id] = snap.chain
+            event_key = self._wallet_event_key(snap)
+            previous_key = self._last_wallet_event_keys.get(wallet_key)
+            if previous_key == event_key:
+                continue
+            self._last_wallet_event_keys[wallet_key] = event_key
+            timestamp = getattr(snap, "timestamp", None) or 0
+            if previous_key is None and timestamp and timestamp < int(self._started_at) - WALLET_ACTIVITY_STARTUP_GRACE_SECONDS:
+                LOG.info(
+                    "wallet activity baseline skipped chain=%s address=%s remark=%s token=%s ts=%s tx=%s",
+                    getattr(snap, "chain", ""),
+                    str(getattr(snap, "wallet_address", "")).lower(),
+                    getattr(snap, "remark", ""),
+                    getattr(snap, "token_symbol", ""),
+                    timestamp,
+                    short_tx(getattr(snap, "tx_hash", "")),
+                )
+                continue
+            token_address = str(getattr(snap, "token_address", "") or "").strip()
+            if token_address and client.is_honeypot_token(str(getattr(snap, "chain", "") or ""), token_address):
+                LOG.info(
+                    "wallet activity honeypot skipped chain=%s address=%s remark=%s token=%s ca=%s ts=%s tx=%s",
+                    getattr(snap, "chain", ""),
+                    str(getattr(snap, "wallet_address", "")).lower(),
+                    getattr(snap, "remark", ""),
+                    getattr(snap, "token_symbol", ""),
+                    token_address,
+                    timestamp,
+                    short_tx(getattr(snap, "tx_hash", "")),
+                )
+                continue
+            if self._is_wallet_noise(snap, wallet):
+                continue
+            fresh_snapshots.append(snap)
 
-        latest = max(
-            self._wallet_snapshots.values(),
-            key=lambda item: getattr(item, "timestamp", None) or 0,
+        if not fresh_snapshots:
+            return
+
+        latest = max(fresh_snapshots, key=lambda item: getattr(item, "timestamp", None) or 0)
+        LOG.info(
+            "wallet activity emitted chain=%s address=%s remark=%s side=%s token=%s ca=%s amount=%s%s ts=%s tx=%s",
+            getattr(latest, "chain", ""),
+            str(getattr(latest, "wallet_address", "")).lower(),
+            getattr(latest, "remark", ""),
+            getattr(latest, "side", ""),
+            getattr(latest, "token_symbol", ""),
+            getattr(latest, "token_address", ""),
+            getattr(latest, "native_amount", None),
+            getattr(latest, "native_symbol", ""),
+            getattr(latest, "timestamp", None),
+            short_tx(getattr(latest, "tx_hash", "")),
         )
-        key = (
-            f"{getattr(latest, 'chain', '')}:"
-            f"{getattr(latest, 'wallet_address', '')}:"
-            f"{getattr(latest, 'tx_hash', '')}:"
-            f"{getattr(latest, 'side', '')}:"
-            f"{getattr(latest, 'timestamp', '')}:"
-            f"{getattr(latest, 'native_amount', '')}"
+        self.wallet_activity.emit(latest)
+
+    def _wallet_event_key(self, snap: object) -> str:
+        return (
+            f"{getattr(snap, 'tx_hash', '')}:"
+            f"{getattr(snap, 'side', '')}:"
+            f"{getattr(snap, 'timestamp', '')}:"
+            f"{getattr(snap, 'native_amount', '')}:"
+            f"{getattr(snap, 'token_address', '')}"
         )
-        if key != self._last_wallet_key:
-            self._last_wallet_key = key
-            LOG.info(
-                "wallet activity emitted chain=%s address=%s remark=%s side=%s token=%s ca=%s amount=%s%s ts=%s tx=%s",
-                getattr(latest, "chain", ""),
-                str(getattr(latest, "wallet_address", "")).lower(),
-                getattr(latest, "remark", ""),
-                getattr(latest, "side", ""),
-                getattr(latest, "token_symbol", ""),
-                getattr(latest, "token_address", ""),
-                getattr(latest, "native_amount", None),
-                getattr(latest, "native_symbol", ""),
-                getattr(latest, "timestamp", None),
-                short_tx(getattr(latest, "tx_hash", "")),
-            )
-            self.wallet_activity.emit(latest)
+
+    def _is_wallet_noise(self, snap: object, wallet: dict[str, Any]) -> bool:
+        return False
 
     def _wallet_poll_chains(self, wallet_id: str, chains: list[str], now: float | None = None) -> list[str]:
         now = time.monotonic() if now is None else now
@@ -524,6 +591,7 @@ class MarketWorker(QThread):
                     "address": address,
                     "chain": chain,
                     "chains": chains,
+                    "group": str(wallet.get("group") or "默认").strip()[:18] or "默认",
                     "avatar_kind": avatar_kind,
                     "avatar_value": avatar_value,
                 }
@@ -544,6 +612,9 @@ class MarketWorker(QThread):
                 "enabled": bool(token.get("enabled", True)),
                 "pinned": bool(token.get("pinned", False)),
             }
+            for key in ("last_market_cap", "last_price", "last_change_percent", "last_volume_24h", "last_alert_at", "alert_count"):
+                if key in token:
+                    item[key] = token.get(key)
             if item["address"].startswith(("0x", "0X")):
                 item["address"] = item["address"].lower()
             if item["chain"] and item["address"]:

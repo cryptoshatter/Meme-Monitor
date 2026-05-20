@@ -4,6 +4,7 @@ import time
 import uuid
 from dataclasses import dataclass
 import re
+import threading
 from typing import Any
 
 import requests
@@ -52,6 +53,7 @@ class WalletActivitySnapshot:
     received_at: float
     avatar_kind: str = "emoji"
     avatar_value: str = ""
+    group: str = ""
 
 
 @dataclass(slots=True)
@@ -67,6 +69,7 @@ class WalletHoldingSnapshot:
     unrealized_profit: float | None
     realized_profit: float | None
     total_profit: float | None
+    market_cap: float | None
     avg_buy_market_cap: float | None
     avg_sell_market_cap: float | None
     holding_duration_seconds: int | None
@@ -93,6 +96,12 @@ CHAIN_NATIVE_ALIASES: dict[str, set[str]] = {
     "bsc": {"bnb", "wbnb"},
 }
 DEFAULT_KOL_AVATAR = "\U0001f4a0"
+HONEYPOT_CACHE_TTL_SECONDS = 600.0
+HONEYPOT_FAILURE_CACHE_TTL_SECONDS = 60.0
+HONEYPOT_FLAG_KEYS = {"is_honeypot", "honeypot"}
+HONEYPOT_CONTAINER_KEYS = {"token", "base_token", "basetoken", "security", "token_security", "risk", "audit"}
+_HONEYPOT_CACHE: dict[str, tuple[float, bool]] = {}
+_HONEYPOT_CACHE_LOCK = threading.Lock()
 
 
 class GmgnOpenApiClient:
@@ -116,6 +125,70 @@ class GmgnOpenApiClient:
     def get_token_info(self, chain: str, address: str) -> TokenSnapshot:
         data = self._normal_get("/v1/token/info", {"chain": chain, "address": address})
         return parse_token_snapshot(chain, address, data)
+
+    def get_token_security(self, chain: str, address: str) -> dict[str, Any]:
+        return self._normal_get(
+            "/v1/token/security",
+            {"chain": chain, "address": address},
+            timeout=(0.9, 1.8),
+            retry_network_once=False,
+        )
+
+    def get_token_risk_tags(self, chain: str, address: str) -> list[str]:
+        data: dict[str, Any] = {}
+        try:
+            data = self.get_token_security(chain, address)
+        except Exception:
+            try:
+                data = self._normal_get(
+                    "/v1/token/info",
+                    {"chain": chain, "address": address},
+                    timeout=(0.9, 1.8),
+                    retry_network_once=False,
+                )
+            except Exception:
+                return ["风险未知"]
+        return risk_tags_from_token_data(data)
+
+    def is_honeypot_token(self, chain: str, address: str) -> bool:
+        chain = str(chain or "").lower().strip()
+        address = _clean_chain_address(address)
+        if chain == "sol" or not chain or not address:
+            return False
+        native = CHAIN_NATIVE_ASSETS.get(chain, ("", ""))[1].lower()
+        if native and address.lower() == native:
+            return False
+
+        key = f"{chain}:{address.lower()}"
+        now = time.monotonic()
+        with _HONEYPOT_CACHE_LOCK:
+            cached = _HONEYPOT_CACHE.get(key)
+            if cached and cached[0] > now:
+                return cached[1]
+
+        result: bool | None = None
+        for fetch in (
+            lambda: self.get_token_security(chain, address),
+            lambda: self._normal_get(
+                "/v1/token/info",
+                {"chain": chain, "address": address},
+                timeout=(0.9, 1.8),
+                retry_network_once=False,
+            ),
+        ):
+            try:
+                flag = honeypot_flag_from_token_data(fetch())
+            except Exception:
+                continue
+            if flag is not None:
+                result = flag
+                break
+
+        value = bool(result)
+        ttl = HONEYPOT_CACHE_TTL_SECONDS if result is not None else HONEYPOT_FAILURE_CACHE_TTL_SECONDS
+        with _HONEYPOT_CACHE_LOCK:
+            _HONEYPOT_CACHE[key] = (now + ttl, value)
+        return value
 
     def get_wallet_activity(
         self,
@@ -218,6 +291,7 @@ class GmgnOpenApiClient:
         remark: str,
         avatar_kind: str = "emoji",
         avatar_value: str = "",
+        group: str = "",
     ) -> WalletActivitySnapshot:
         data = self.get_wallet_activity(chain, wallet_address, limit=20)
         snap = parse_wallet_activity_snapshot(
@@ -228,6 +302,7 @@ class GmgnOpenApiClient:
             avatar_value=avatar_value,
             data=data,
             native_price_usd=None,
+            group=group,
         )
         if snap.side and snap.native_amount is None and snap.cost_usd is not None:
             return parse_wallet_activity_snapshot(
@@ -238,6 +313,7 @@ class GmgnOpenApiClient:
                 avatar_value=avatar_value,
                 data=data,
                 native_price_usd=self.get_native_price_usd(chain),
+                group=group,
             )
         return snap
 
@@ -387,6 +463,109 @@ def parse_token_snapshot(chain: str, address: str, data: dict[str, Any]) -> Toke
     )
 
 
+def honeypot_flag_from_token_data(data: dict[str, Any]) -> bool | None:
+    if not isinstance(data, dict):
+        return None
+    stack: list[dict[str, Any]] = [data]
+    scanned = 0
+    while stack and scanned < 80:
+        current = stack.pop()
+        scanned += 1
+        for key, value in current.items():
+            normalized_key = str(key or "").lower().strip()
+            if normalized_key in HONEYPOT_FLAG_KEYS:
+                flag = _truthy_honeypot_flag(value)
+                if flag is not None:
+                    return flag
+            if normalized_key in HONEYPOT_CONTAINER_KEYS and isinstance(value, dict):
+                stack.append(value)
+    return None
+
+
+def is_honeypot_token_data(data: dict[str, Any]) -> bool:
+    return honeypot_flag_from_token_data(data) is True
+
+
+def risk_tags_from_token_data(data: dict[str, Any]) -> list[str]:
+    if not isinstance(data, dict):
+        return ["风险未知"]
+    tags: list[str] = []
+    flag = honeypot_flag_from_token_data(data)
+    if flag is True:
+        tags.append("貔貅")
+    buy_tax = _recursive_first_float(data, ["buy_tax", "buytax", "tax_buy", "buy_fee", "buy_fee_rate"])
+    sell_tax = _recursive_first_float(data, ["sell_tax", "selltax", "tax_sell", "sell_fee", "sell_fee_rate"])
+    max_tax = max(value for value in [buy_tax, sell_tax] if value is not None) if any(value is not None for value in [buy_tax, sell_tax]) else None
+    if max_tax is not None:
+        tax = max_tax * 100 if 0 < max_tax <= 1 else max_tax
+        if tax >= 10:
+            tags.append("高税")
+    liquidity = _recursive_first_float(data, ["liquidity", "liquidity_usd", "pool_liquidity", "reserve_usd"])
+    if liquidity is not None and 0 < liquidity < 10_000:
+        tags.append("池小")
+    holder_rate = _recursive_first_float(data, ["top10_holder_rate", "top_10_holder_rate", "top_holders_rate", "holder_top10_rate"])
+    if holder_rate is not None:
+        rate = holder_rate * 100 if 0 < holder_rate <= 1 else holder_rate
+        if rate >= 45:
+            tags.append("集中")
+    mintable = _recursive_truthy(data, ["mintable", "can_mint", "is_mintable"])
+    if mintable is True:
+        tags.append("可增发")
+    blacklist = _recursive_truthy(data, ["blacklist", "is_blacklist", "can_blacklist"])
+    if blacklist is True:
+        tags.append("黑名单")
+    if not tags:
+        tags.append("低风险")
+    return tags[:4]
+
+
+def _recursive_first_float(data: dict[str, Any], keys: list[str]) -> float | None:
+    stack: list[dict[str, Any]] = [data]
+    wanted = {key.lower() for key in keys}
+    scanned = 0
+    while stack and scanned < 120:
+        current = stack.pop()
+        scanned += 1
+        for key, value in current.items():
+            if str(key or "").lower().strip() in wanted:
+                number = _to_float(value)
+                if number is not None:
+                    return number
+            if isinstance(value, dict):
+                stack.append(value)
+    return None
+
+
+def _recursive_truthy(data: dict[str, Any], keys: list[str]) -> bool | None:
+    stack: list[dict[str, Any]] = [data]
+    wanted = {key.lower() for key in keys}
+    scanned = 0
+    while stack and scanned < 120:
+        current = stack.pop()
+        scanned += 1
+        for key, value in current.items():
+            if str(key or "").lower().strip() in wanted:
+                return _truthy_honeypot_flag(value)
+            if isinstance(value, dict):
+                stack.append(value)
+    return None
+
+
+def _truthy_honeypot_flag(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text in {"true", "1", "yes", "y", "honeypot"}:
+        return True
+    if text in {"false", "0", "no", "n", "none", "null", "safe"}:
+        return False
+    return None
+
+
 def parse_wallet_activity_snapshot(
     chain: str,
     wallet_address: str,
@@ -395,12 +574,14 @@ def parse_wallet_activity_snapshot(
     avatar_value: str,
     data: dict[str, Any],
     native_price_usd: float | None = None,
+    group: str = "",
 ) -> WalletActivitySnapshot:
     native_symbol = CHAIN_NATIVE_ASSETS.get(chain, (chain.upper(), ""))[0]
     activities = [
         item
         for item in _extract_activities(data)
         if _activity_side(item) in {"buy", "sell"}
+        and not is_honeypot_token_data(item)
     ]
     if not activities:
         return WalletActivitySnapshot(
@@ -418,6 +599,7 @@ def parse_wallet_activity_snapshot(
             tx_hash="",
             avatar_kind=avatar_kind,
             avatar_value=avatar_value,
+            group=group,
             raw=data,
             received_at=time.time(),
         )
@@ -454,6 +636,7 @@ def parse_wallet_activity_snapshot(
         tx_hash=tx_hash,
         avatar_kind=avatar_kind,
         avatar_value=avatar_value,
+        group=group,
         raw=item,
         received_at=time.time(),
     )
@@ -504,6 +687,8 @@ def parse_wallet_activity_items(chain: str, wallet_address: str, data: dict[str,
     for item in _extract_activities(data):
         side = _activity_side(item)
         if side not in {"buy", "sell"}:
+            continue
+        if is_honeypot_token_data(item):
             continue
         token = item.get("token") if isinstance(item.get("token"), dict) else {}
         base_token = item.get("base_token") if isinstance(item.get("base_token"), dict) else {}
@@ -602,6 +787,8 @@ def parse_wallet_holdings(chain: str, wallet_address: str, data: dict[str, Any])
     now = time.time()
     for item in _extract_holdings(data):
         token = item.get("token") if isinstance(item.get("token"), dict) else {}
+        if is_honeypot_token_data(item) or is_honeypot_token_data(token):
+            continue
         token_address = _clean_chain_address(
             token.get("address")
             or token.get("token_address")
@@ -623,6 +810,7 @@ def parse_wallet_holdings(chain: str, wallet_address: str, data: dict[str, Any])
         if total is None and (unrealized is not None or realized is not None):
             total = (unrealized or 0.0) + (realized or 0.0)
         buy_count, sell_count = _extract_holding_buy_sell_counts(item)
+        market_cap = _holding_market_cap(item)
         avg_buy_market_cap = _extract_holding_avg_market_cap(item, "buy")
         avg_sell_market_cap = _extract_holding_avg_market_cap(item, "sell")
         holdings.append(
@@ -638,6 +826,7 @@ def parse_wallet_holdings(chain: str, wallet_address: str, data: dict[str, Any])
                 unrealized_profit=unrealized,
                 realized_profit=realized,
                 total_profit=total,
+                market_cap=market_cap,
                 avg_buy_market_cap=avg_buy_market_cap,
                 avg_sell_market_cap=avg_sell_market_cap,
                 holding_duration_seconds=_extract_holding_duration_seconds(item, now),
@@ -733,6 +922,27 @@ def _extract_holding_buy_sell_counts(item: dict[str, Any]) -> tuple[int | None, 
     buy_count = _first_float(item, ["history_total_buys", "buy_tx_count", "buy_count", "buy_trade_count"])
     sell_count = _first_float(item, ["history_total_sells", "sell_tx_count", "sell_count", "sell_trade_count"])
     return _count_or_none(buy_count), _count_or_none(sell_count)
+
+
+def _holding_market_cap(item: dict[str, Any]) -> float | None:
+    keys = ["market_cap", "marketcap", "mcap", "fdv", "fully_diluted_valuation", "token_market_cap"]
+    direct = _first_float(item, keys)
+    if direct is not None:
+        return direct
+    for container_name in ("token", "base_token", "baseToken", "pool", "stat"):
+        container = item.get(container_name)
+        if isinstance(container, dict):
+            direct = _first_float(container, keys)
+            if direct is not None:
+                return direct
+    price = _activity_price_usd(item, None, None) or _extract_price(item)
+    supply = _first_float(item, ["circulating_supply", "total_supply", "supply", "token_supply", "max_supply"])
+    token = item.get("token") if isinstance(item.get("token"), dict) else {}
+    if supply is None and token:
+        supply = _first_float(token, ["circulating_supply", "total_supply", "supply", "token_supply", "max_supply"])
+    if price is not None and supply is not None and 0 < supply < 1_000_000_000_000_000:
+        return price * supply
+    return None
 
 
 def _extract_holding_avg_market_cap(item: dict[str, Any], side: str) -> float | None:

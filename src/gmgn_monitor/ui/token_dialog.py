@@ -110,7 +110,7 @@ class TokenItemDelegate(QStyledItemDelegate):
 
         text_left = logo_rect.right() + 11
         action_w = 88 if not pinned else 38
-        text_w = max(40, rect.right() - text_left - action_w - 8)
+        text_w = max(40, rect.right() - text_left - action_w - 10)
         title_font = QFont("Segoe UI Variable Text", 10, QFont.Weight.Black)
         sub_font = QFont("Cascadia Mono", 7, QFont.Weight.Bold)
         painter.setFont(title_font)
@@ -322,6 +322,7 @@ class TokenDialog(QDialog):
         self._info_workers: dict[str, TokenInfoWorker] = {}
         self._threshold_edits: list[QLineEdit] = []
         self._theme = active_theme()
+        self._sort_mode = "默认"
 
         self.list_widget = QListWidget(self)
         self.list_widget.setGeometry(12, 124, 306, 268)
@@ -339,6 +340,12 @@ class TokenDialog(QDialog):
         self.sync_button.setAutoDefault(False)
         self.sync_button.setDefault(False)
         self.sync_button.clicked.connect(self._sync_global_threshold)
+
+        self.sort_button = QPushButton("排序:默认", self)
+        self.sort_button.setGeometry(206, 18, 72, 26)
+        self.sort_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sort_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.sort_button.clicked.connect(self._cycle_sort_mode)
 
         self.close_button = EmbossCloseButton(self)
         self.close_button.setGeometry(288, 16, 25, 25)
@@ -441,6 +448,7 @@ class TokenDialog(QDialog):
         super().reject()
 
     def _refresh_list(self) -> None:
+        self._sort_tokens()
         self.list_widget.clear()
         self._clear_threshold_edits()
         for token in self._tokens:
@@ -448,6 +456,24 @@ class TokenDialog(QDialog):
             item.setData(Qt.ItemDataRole.UserRole, dict(token))
             self.list_widget.addItem(item)
         self._install_threshold_edits()
+
+    def _cycle_sort_mode(self) -> None:
+        modes = ["默认", "异动", "涨跌", "成交额"]
+        index = modes.index(self._sort_mode) if self._sort_mode in modes else 0
+        self._sort_mode = modes[(index + 1) % len(modes)]
+        self.sort_button.setText(f"排序:{self._sort_mode}")
+        self._refresh_list()
+
+    def _sort_tokens(self) -> None:
+        pinned = [token for token in self._tokens if token.get("pinned")]
+        others = [token for token in self._tokens if not token.get("pinned")]
+        if self._sort_mode == "异动":
+            others.sort(key=lambda token: (float_or_zero(token.get("last_alert_at")), float_or_zero(token.get("alert_count"))), reverse=True)
+        elif self._sort_mode == "涨跌":
+            others.sort(key=lambda token: abs(float_or_zero(token.get("last_change_percent"))), reverse=True)
+        elif self._sort_mode == "成交额":
+            others.sort(key=lambda token: float_or_zero(token.get("last_volume_24h")), reverse=True)
+        self._tokens = pinned + others
 
     def _install_threshold_edits(self) -> None:
         for row, token in enumerate(self._tokens):
@@ -708,6 +734,25 @@ class TokenDialog(QDialog):
             border=rgba(theme.accent_hover, 94),
             accent_hover=hex_rgb(theme.accent_hover),
         ))
+        self.sort_button.setStyleSheet("""
+            QPushButton {{
+                background: {surface};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 9px;
+                font: 900 10px "Microsoft YaHei UI";
+            }}
+            QPushButton:hover {{
+                background: {hover_bg};
+                border: 1px solid {hover_border};
+            }}
+        """.format(
+            surface=rgba(theme.surface, 196),
+            text=hex_rgb(theme.text_soft),
+            border=rgba(theme.border, 64),
+            hover_bg=rgba(theme.accent, 38),
+            hover_border=rgba(theme.border_hover, 120),
+        ))
         self.sync_button.setStyleSheet("""
             QPushButton {{
                 background: {surface};
@@ -816,6 +861,18 @@ def format_threshold_value(value: object) -> str:
         return ""
     text = f"{number:.3f}".rstrip("0").rstrip(".")
     return text or "0.1"
+
+
+def float_or_none(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def float_or_zero(value: object) -> float:
+    number = float_or_none(value)
+    return number if number is not None else 0.0
 
 
 def QPixmapNull():

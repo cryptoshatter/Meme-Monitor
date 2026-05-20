@@ -67,6 +67,7 @@ class DisplayData:
 @dataclass(slots=True)
 class WalletDisplay:
     remark: str = ""
+    group: str = ""
     wallet_address: str = ""
     chain: str = ""
     side: str = ""
@@ -93,6 +94,7 @@ class TokenAlertDisplay:
     market_cap: float | None = None
     price: float | None = None
     received_at: float = 0.0
+    reason: str = ""
 
 
 class WalletActivityPanel(QWidget):
@@ -272,7 +274,8 @@ def wallet_activity_full_text(activity: WalletDisplay) -> str:
     amount = format_native_amount(activity.native_amount, activity.native_symbol)
     side = "BUY" if activity.side == "buy" else "SELL"
     token = f" {activity.token_symbol}" if activity.token_symbol else ""
-    return f"{activity.remark} {side}{token} {amount}".strip()
+    remark = wallet_display_remark(activity)
+    return f"{remark} {side}{token} {amount}".strip()
 
 
 def wallet_display_text(activity: WalletDisplay, painter: QPainter, width: int) -> str:
@@ -285,7 +288,7 @@ def wallet_display_text(activity: WalletDisplay, painter: QPainter, width: int) 
     token = f" {activity.token_symbol}" if activity.token_symbol else ""
     suffix = f"{side}{token} {amount}".strip()
     suffix_w = metrics.horizontalAdvance(suffix) + 5
-    remark = metrics.elidedText(activity.remark, Qt.TextElideMode.ElideRight, max(0, width - suffix_w))
+    remark = metrics.elidedText(wallet_display_remark(activity), Qt.TextElideMode.ElideRight, max(0, width - suffix_w))
     return f"{remark} {suffix}".strip()
 
 
@@ -294,7 +297,7 @@ def wallet_activity_inline_width(activity: WalletDisplay, font: QFont, token_siz
     amount = format_native_amount(activity.native_amount, activity.native_symbol)
     side = "BUY" if activity.side == "buy" else "SELL"
     token = (activity.token_symbol or "").strip()
-    text = f"{activity.remark} {side} {token} {amount}".strip()
+    text = f"{wallet_display_remark(activity)} {side} {token} {amount}".strip()
     icon_w = token_size + 5 if token else 0
     return metrics.horizontalAdvance(text) + icon_w + 8
 
@@ -312,7 +315,7 @@ def draw_wallet_activity_inline(
     amount = format_native_amount(activity.native_amount, activity.native_symbol)
     side = "BUY" if activity.side == "buy" else "SELL"
     token = (activity.token_symbol or "").strip()
-    remark = (activity.remark or "Wallet").strip()
+    remark = wallet_display_remark(activity)
     gap = 4
     icon_w = token_size + 5 if token else 0
     fixed_w = metrics.horizontalAdvance(side) + gap + icon_w + metrics.horizontalAdvance(f"{token} {amount}".strip()) + 4
@@ -348,6 +351,14 @@ def draw_wallet_activity_inline(
     painter.drawText(tail_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elide_by_width(painter, tail, tail_rect.width()))
 
 
+def wallet_display_remark(activity: WalletDisplay) -> str:
+    remark = (activity.remark or "Wallet").strip()
+    group = (activity.group or "").strip()
+    if group and group != "默认":
+        return f"{group}·{remark}"
+    return remark
+
+
 def wallet_history_path() -> Path:
     return app_data_dir() / "wallet_activity_history.json"
 
@@ -378,6 +389,7 @@ class FloatingCard(QWidget):
         self._logo_loader: LogoLoader | None = None
         self._asset_logos: dict[str, object] = {}
         self._asset_logo_loaders: dict[str, LogoLoader] = {}
+        self._asset_logo_failed_until: dict[str, float] = {}
         self._drag_origin: QPoint | None = None
         self._locked = False
         self._hover = False
@@ -396,6 +408,7 @@ class FloatingCard(QWidget):
         self._wallet = WalletDisplay()
         self._wallet_history: list[WalletDisplay] = []
         self._token_alert = TokenAlertDisplay()
+        self._risk_tags: list[str] = ["风险未知"]
         self._token_alert_flash = 0.0
         self._wallet_flash = 0.0
         self._wallet_direction = 0
@@ -593,6 +606,7 @@ class FloatingCard(QWidget):
         new_key = f"{snap.tx_hash}:{snap.side}:{snap.native_amount}"
         self._wallet = WalletDisplay(
             remark=snap.remark or "Wallet",
+            group=getattr(snap, "group", ""),
             wallet_address=snap.wallet_address,
             chain=snap.chain,
             side=snap.side,
@@ -646,12 +660,28 @@ class FloatingCard(QWidget):
             market_cap=to_float_or_none(payload.get("market_cap")),
             price=to_float_or_none(payload.get("price")),
             received_at=received_at,
+            reason=str(payload.get("reason") or "").strip()[:24],
         )
         self._ensure_asset_logo(self._token_alert.logo_url)
         self._resize_for_content()
         if triggered:
             self._token_alert_anim.stop()
             self._token_alert_anim.start()
+        self.update()
+
+    def update_token_risk(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        chain = str(payload.get("chain") or "").lower().strip()
+        address = str(payload.get("address") or "").strip()
+        if f"{chain}:{address}".lower() != f"{self._data.chain}:{self._data.address}".lower():
+            return
+        tags = payload.get("tags")
+        if not isinstance(tags, list):
+            tags = []
+        clean = [str(tag).strip()[:8] for tag in tags if str(tag).strip()]
+        self._risk_tags = clean[:4] or ["风险未知"]
+        self._resize_for_content()
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -881,6 +911,7 @@ class FloatingCard(QWidget):
             avatar_kind = "emoji"
         return WalletDisplay(
             remark=str(raw.get("remark") or "Wallet").strip() or "Wallet",
+            group=str(raw.get("group") or "").strip(),
             wallet_address=str(raw.get("wallet_address") or "").strip(),
             chain=str(raw.get("chain") or "").lower().strip(),
             side=side,
@@ -996,11 +1027,9 @@ class FloatingCard(QWidget):
         value_text = self._token_alert_value_text()
         change_text = format_change(self._token_alert.delta_percent)
         time_text = self._token_alert_time_text()
-        symbol_w = QFontMetrics(self._collapsed_side_symbol_font()).horizontalAdvance(symbol)
         time_w = QFontMetrics(self._collapsed_side_time_font()).horizontalAdvance(time_text) if time_text else 0
-        value_w = QFontMetrics(self._collapsed_change_font()).horizontalAdvance(value_text)
-        change_w = QFontMetrics(self._collapsed_change_font()).horizontalAdvance(change_text)
-        return clamp_int(24 + 16 + 6 + min(symbol_w, 118) + 7 + value_w + 7 + change_w + 17 + time_w + 10, 168, 282)
+        text_w = QFontMetrics(self._collapsed_change_font()).horizontalAdvance(f"{symbol} {value_text} {change_text}")
+        return clamp_int(4 + 16 + 6 + text_w + 4 + 15 + (4 + time_w if time_text else 0) + 6, 168, 262)
 
     def _collapsed_alert_side_width(self) -> int:
         symbol = self._token_alert.symbol or "--"
@@ -1164,6 +1193,9 @@ class FloatingCard(QWidget):
             return
         QDesktopServices.openUrl(QUrl(f"https://gmgn.ai/{chain}/token/{address}"))
 
+    def open_current_token(self) -> None:
+        self._open_gmgn_token(self._data.chain, self._data.address)
+
     def _has_active_token_alert(self) -> bool:
         return bool(self._token_alert.address)
 
@@ -1189,7 +1221,8 @@ class FloatingCard(QWidget):
             return f"{symbol} {direction}{threshold}!"
         if compact:
             return f"{symbol} {self._token_alert_direction_text()} {threshold}!"
-        return f"{symbol} {self._token_alert_direction_text()} {threshold} !!!"
+        reason = self._token_alert.reason or "异动"
+        return f"{symbol} {self._token_alert_direction_text()} {threshold} {reason} !!!"
 
     def _token_alert_value_text(self) -> str:
         return format_market_cap(self._token_alert.market_cap) if self._token_alert.market_cap else format_price(self._token_alert.price)
@@ -1245,6 +1278,8 @@ class FloatingCard(QWidget):
         key = self._asset_logo_key(url)
         if not key or key in self._asset_logos or key in self._asset_logo_loaders:
             return
+        if self._asset_logo_failed_until.get(key, 0.0) > time.monotonic():
+            return
         loader = LogoLoader(key, 16)
         loader.loaded.connect(self._on_asset_logo_loaded)
         loader.failed.connect(self._on_asset_logo_failed)
@@ -1255,11 +1290,15 @@ class FloatingCard(QWidget):
     def _on_asset_logo_loaded(self, url: str, pixmap) -> None:
         key = self._asset_logo_key(url)
         self._asset_logo_loaders.pop(key, None)
+        self._asset_logo_failed_until.pop(key, None)
         self._asset_logos[key] = pixmap
         self.update()
 
     def _on_asset_logo_failed(self, url: str) -> None:
-        self._asset_logo_loaders.pop(self._asset_logo_key(url), None)
+        key = self._asset_logo_key(url)
+        self._asset_logo_loaders.pop(key, None)
+        if key:
+            self._asset_logo_failed_until[key] = time.monotonic() + 300.0
 
     def _token_logo_pixmap(self, symbol: str, chain: str, url: str, size: int = 16):
         key = self._asset_logo_key(url)
@@ -1609,8 +1648,8 @@ class FloatingCard(QWidget):
     def _draw_collapsed_bar_content(self, painter: QPainter, rect: QRect) -> None:
         alert_rect = QRect()
         if self._has_active_token_alert():
-            alert_w = min(self._collapsed_alert_inline_width(), max(190, int(rect.width() * 0.50)))
-            alert_rect = QRect(rect.right() - alert_w - 4, rect.top() + 14, alert_w, 20)
+            alert_w = min(self._collapsed_alert_inline_width(), max(190, int(rect.width() * 0.46)))
+            alert_rect = QRect(rect.right() - alert_w - 12, rect.top() + 14, alert_w, 20)
             rect = QRect(rect.left(), rect.top(), max(190, rect.width() - alert_w - 10), rect.height())
 
         left = rect.left() + 12
@@ -1728,7 +1767,7 @@ class FloatingCard(QWidget):
         bg.setAlpha(46 + int(62 * pulse))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(bg)
-        painter.drawRoundedRect(rect.adjusted(-2, 0, 2, 0), 9, 9)
+        painter.drawRoundedRect(rect.adjusted(-2, 0, 0, 0), 9, 9)
 
         logo_size = 14 if compact else 16
         logo_rect = QRect(rect.left() + 4, rect.center().y() - logo_size // 2, logo_size, logo_size)
@@ -1869,6 +1908,10 @@ class FloatingCard(QWidget):
         painter.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
         painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, self._data.chain)
 
+        risk_rect = QRect(badge.right() + 8, top + 3, max(0, right - badge.right() - 64), 16)
+        if risk_rect.width() >= 42:
+            self._draw_risk_tags(painter, risk_rect)
+
         live_color = self._theme.color("positive") if self._data.status == "Live" else self._theme.color("warning")
         if self._data.status == "Error":
             live_color = self._theme.color("negative")
@@ -1968,12 +2011,30 @@ class FloatingCard(QWidget):
                 self._draw_token_alert(painter, QRect(left, activity_y + 24, right - left, 22))
             else:
                 self._token_alert_rect = QRect()
-        else:
-            self._wallet_rect = QRect()
-            if self._has_active_token_alert():
-                self._draw_token_alert(painter, QRect(left, bottom_y + 22, right - left, 22))
-            else:
-                self._token_alert_rect = QRect()
+
+    def _draw_risk_tags(self, painter: QPainter, rect: QRect) -> None:
+        tags = self._risk_tags or ["风险未知"]
+        x = rect.left()
+        painter.setFont(QFont("Microsoft YaHei UI", 6, QFont.Weight.Black))
+        metrics = QFontMetrics(painter.font())
+        for tag in tags[:3]:
+            text = tag or "--"
+            width = min(max(30, metrics.horizontalAdvance(text) + 12), rect.right() - x + 1)
+            if width < 24:
+                break
+            is_bad = text in {"貔貅", "高税", "池小", "集中", "可增发", "黑名单", "风险未知"}
+            color = self._theme.color("negative" if is_bad else "positive")
+            bg = QColor(color)
+            bg.setAlpha(24)
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 86), 1))
+            painter.setBrush(bg)
+            tag_rect = QRect(x, rect.top(), width, rect.height())
+            painter.drawRoundedRect(tag_rect, 7, 7)
+            painter.setPen(color)
+            painter.drawText(tag_rect.adjusted(4, 0, -4, 0), Qt.AlignmentFlag.AlignCenter, elide_by_width(painter, text, tag_rect.width() - 8))
+            x += width + 4
+            if x >= rect.right():
+                break
 
     def _draw_flip_text(
         self,

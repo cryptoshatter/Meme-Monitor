@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Any
 
 from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QPointF, QRect, QRectF, QSize, Qt, QThread, QTimer, Signal, QPropertyAnimation
-from PySide6.QtGui import QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPainter, QPaintEvent, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPainter, QPaintEvent, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QStyledItemDelegate, QStyle
 
 from gmgn_monitor.gmgn_client import GmgnOpenApiClient, normalize_wallet_address, parse_wallet_activity_items, parse_wallet_holdings, possible_wallet_chains
@@ -80,17 +79,11 @@ class PortfolioWorker(QThread):
 
         errors: list[str] = []
         holdings: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=min(4, len(targets))) as pool:
-            futures = {
-                pool.submit(_fetch_holdings_for_chain, self.api_key, self.api_host, chain, wallet_address): (chain, wallet_address)
-                for chain, wallet_address in targets
-            }
-            for future in as_completed(futures):
-                chain, _wallet_address = futures[future]
-                try:
-                    holdings.extend(future.result())
-                except Exception as exc:
-                    errors.append(f"{chain.upper()}: {exc}")
+        for chain, wallet_address in targets:
+            try:
+                holdings.extend(_fetch_holdings_for_chain(self.api_key, self.api_host, chain, wallet_address))
+            except Exception as exc:
+                errors.append(f"{chain.upper()}: {exc}")
 
         holdings.sort(key=lambda item: float(item.get("usd_value") or 0.0), reverse=True)
         if holdings:
@@ -98,17 +91,11 @@ class PortfolioWorker(QThread):
             return
 
         activities: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=min(4, len(targets))) as pool:
-            futures = {
-                pool.submit(_fetch_recent_activity_for_chain, self.api_key, self.api_host, chain, wallet_address): (chain, wallet_address)
-                for chain, wallet_address in targets
-            }
-            for future in as_completed(futures):
-                chain, _wallet_address = futures[future]
-                try:
-                    activities.extend(future.result())
-                except Exception as exc:
-                    errors.append(f"{chain.upper()}: {exc}")
+        for chain, wallet_address in targets:
+            try:
+                activities.extend(_fetch_recent_activity_for_chain(self.api_key, self.api_host, chain, wallet_address))
+            except Exception as exc:
+                errors.append(f"{chain.upper()}: {exc}")
         activities.sort(key=lambda item: int(item.get("timestamp") or 0), reverse=True)
         if activities:
             self.resolved.emit(f"{_wallet_label(self.evm_address, self.sol_address)}  无持仓，显示最近交易", activities[:20])
@@ -119,13 +106,25 @@ class PortfolioWorker(QThread):
 def _fetch_holdings_for_chain(api_key: str, api_host: str, chain: str, wallet_address: str) -> list[dict[str, Any]]:
     client = GmgnOpenApiClient(api_key, api_host)
     data = client.get_wallet_holdings(chain, wallet_address, limit=20, order_by="usd_value", direction="desc")
-    return [asdict(item) for item in parse_wallet_holdings(chain, wallet_address, data)]
+    rows = [asdict(item) for item in parse_wallet_holdings(chain, wallet_address, data)]
+    return _filter_honeypot_rows(client, rows)
 
 
 def _fetch_recent_activity_for_chain(api_key: str, api_host: str, chain: str, wallet_address: str) -> list[dict[str, Any]]:
     client = GmgnOpenApiClient(api_key, api_host)
     data = client.get_wallet_activity(chain, wallet_address, limit=20, activity_types=["buy", "sell"])
-    return parse_wallet_activity_items(chain, wallet_address, data)
+    return _filter_honeypot_rows(client, parse_wallet_activity_items(chain, wallet_address, data))
+
+
+def _filter_honeypot_rows(client: GmgnOpenApiClient, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    clean: list[dict[str, Any]] = []
+    for row in rows:
+        chain = str(row.get("chain") or "").lower().strip()
+        token_address = str(row.get("token_address") or "").strip()
+        if token_address and client.is_honeypot_token(chain, token_address):
+            continue
+        clean.append(row)
+    return clean
 
 
 def _mark_row(item: dict[str, Any], row_type: str) -> dict[str, Any]:
@@ -154,7 +153,7 @@ class TokenActivityWorker(QThread):
         try:
             client = GmgnOpenApiClient(self.api_key, self.api_host)
             data = client.get_wallet_activity(chain, wallet_address, limit=20, activity_types=["buy", "sell"], token_address=token_address)
-            activities = parse_wallet_activity_items(chain, wallet_address, data)
+            activities = _filter_honeypot_rows(client, parse_wallet_activity_items(chain, wallet_address, data))
         except Exception as exc:
             self.failed.emit(self.row, str(exc))
             return
@@ -171,8 +170,8 @@ class PortfolioItemDelegate(QStyledItemDelegate):
         item = index.data(Qt.ItemDataRole.UserRole) or {}
         if isinstance(item, dict) and str(item.get("row_type") or "") == "trade_drawer":
             activities = item.get("activities") if isinstance(item.get("activities"), list) else []
-            return QSize(1042, max(70, min(446, 40 + len(activities[:20]) * 20)))
-        return QSize(1042, 70)
+            return QSize(1154, max(70, min(446, 40 + len(activities[:20]) * 20)))
+        return QSize(1154, 70)
 
     def paint(self, painter: QPainter, option, index) -> None:  # type: ignore[override]
         item = index.data(Qt.ItemDataRole.UserRole) or {}
@@ -220,6 +219,19 @@ class PortfolioItemDelegate(QStyledItemDelegate):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             QFontMetrics(title_font).elidedText(symbol, Qt.TextElideMode.ElideRight, token_width),
         )
+        alert_text = position_alert_text(item) if row_type != "activity" else ""
+        if alert_text:
+            tag_w = min(44, QFontMetrics(sub_font).horizontalAdvance(alert_text) + 14)
+            tag = QRect(token_left + token_width - tag_w, rect.top() + 12, tag_w, 18)
+            tag_color = theme.color("positive") if alert_text == "止盈" else theme.color("negative") if alert_text == "止损" else theme.color("warning")
+            bg = QColor(tag_color)
+            bg.setAlpha(24)
+            painter.setPen(QPen(QColor(tag_color.red(), tag_color.green(), tag_color.blue(), 86), 1))
+            painter.setBrush(bg)
+            painter.drawRoundedRect(tag, 8, 8)
+            painter.setFont(sub_font)
+            painter.setPen(tag_color)
+            painter.drawText(tag, Qt.AlignmentFlag.AlignCenter, alert_text)
         painter.setFont(sub_font)
         painter.setPen(theme.color("text_soft"))
         sub_text = str(item.get("name") or symbol)
@@ -245,14 +257,15 @@ class PortfolioItemDelegate(QStyledItemDelegate):
             )
         else:
             columns = (
-                (rect.left() + 238, 90, format_money(item.get("usd_value"), signed=False), theme.color("text"), Qt.AlignmentFlag.AlignCenter),
-                (rect.left() + 334, 90, format_money(item.get("unrealized_profit")), pnl_color(item.get("unrealized_profit")), Qt.AlignmentFlag.AlignCenter),
-                (rect.left() + 430, 90, format_money(item.get("realized_profit")), pnl_color(item.get("realized_profit")), Qt.AlignmentFlag.AlignCenter),
-                (rect.left() + 526, 90, format_money(item.get("total_profit")), pnl_color(item.get("total_profit")), Qt.AlignmentFlag.AlignCenter),
-                (rect.left() + 622, 150, format_avg_market_cap(item), theme.color("text_soft"), Qt.AlignmentFlag.AlignCenter),
-                (rect.left() + 778, 80, format_duration(item.get("holding_duration_seconds"), with_hand=True), theme.color("text_soft"), Qt.AlignmentFlag.AlignCenter),
-                (rect.left() + 864, 64, format_buy_sell_count(item.get("buy_count"), item.get("sell_count")), theme.color("text_soft"), Qt.AlignmentFlag.AlignCenter),
-                (rect.left() + 934, 86, relative_time(item.get("last_active_timestamp")), theme.color("text_soft"), Qt.AlignmentFlag.AlignCenter),
+                (rect.left() + 246, 84, format_money(item.get("usd_value"), signed=False), theme.color("text"), Qt.AlignmentFlag.AlignCenter),
+                (rect.left() + 338, 84, format_money(item.get("unrealized_profit")), pnl_color(item.get("unrealized_profit")), Qt.AlignmentFlag.AlignCenter),
+                (rect.left() + 430, 84, format_money(item.get("realized_profit")), pnl_color(item.get("realized_profit")), Qt.AlignmentFlag.AlignCenter),
+                (rect.left() + 522, 84, format_money(item.get("total_profit")), pnl_color(item.get("total_profit")), Qt.AlignmentFlag.AlignCenter),
+                (rect.left() + 614, 90, format_money(item.get("market_cap"), signed=False), theme.color("text_soft"), Qt.AlignmentFlag.AlignCenter),
+                (rect.left() + 712, 146, format_avg_market_cap(item), theme.color("text_soft"), Qt.AlignmentFlag.AlignCenter),
+                (rect.left() + 866, 76, format_duration(item.get("holding_duration_seconds"), with_hand=True), theme.color("text_soft"), Qt.AlignmentFlag.AlignCenter),
+                (rect.left() + 950, 58, format_buy_sell_count(item.get("buy_count"), item.get("sell_count")), theme.color("text_soft"), Qt.AlignmentFlag.AlignCenter),
+                (rect.left() + 1016, 90, relative_time(item.get("last_active_timestamp")), theme.color("text_soft"), Qt.AlignmentFlag.AlignCenter),
             )
         for x, width, text, color, align in columns:
             painter.setFont(number_font if text.startswith(("$", "+", "-")) or text.isdigit() else small_font)
@@ -341,12 +354,14 @@ class PortfolioDialog(QDialog):
         sol_address: str = "",
         cached_holdings: list[dict[str, Any]] | None = None,
         parent=None,
+        title: str = "个人持仓",
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("个人持仓")
+        self._title = title or "个人持仓"
+        self.setWindowTitle(self._title)
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self.setFixedSize(1100, 590)
+        self.setFixedSize(1210, 590)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
@@ -377,29 +392,29 @@ class PortfolioDialog(QDialog):
         self._refresh_timer.timeout.connect(self._query)
 
         self.evm_address_edit = QLineEdit(self)
-        self.evm_address_edit.setGeometry(26, 72, 1042, 36)
+        self.evm_address_edit.setGeometry(26, 72, 1158, 36)
         self.evm_address_edit.setPlaceholderText("EVM 钱包地址（ETH / Base / BSC，可空）")
         self.evm_address_edit.setText(normalize_wallet_address(evm_address))
         self.evm_address_edit.textEdited.connect(self._addresses_edited)
         self.evm_address_edit.returnPressed.connect(self._schedule_query)
 
         self.sol_address_edit = QLineEdit(self)
-        self.sol_address_edit.setGeometry(26, 116, 1042, 36)
+        self.sol_address_edit.setGeometry(26, 116, 1158, 36)
         self.sol_address_edit.setPlaceholderText("SOL 钱包地址（可空）")
         self.sol_address_edit.setText(normalize_wallet_address(sol_address))
         self.sol_address_edit.textEdited.connect(self._addresses_edited)
         self.sol_address_edit.returnPressed.connect(self._schedule_query)
 
         self.close_button = EmbossCloseButton(self)
-        self.close_button.setGeometry(1042, 20, 28, 28)
+        self.close_button.setGeometry(1152, 20, 28, 28)
         self.close_button.clicked.connect(self.accept)
 
         self.status_label = QLabel("共 0 条", self)
-        self.status_label.setGeometry(26, 542, 1042, 24)
+        self.status_label.setGeometry(26, 542, 1158, 24)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self.list_widget = SmoothListWidget(self)
-        self.list_widget.setGeometry(24, 190, 1050, 342)
+        self.list_widget.setGeometry(24, 190, 1162, 342)
         self.list_widget.setItemDelegate(PortfolioItemDelegate(self.list_widget))
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -426,6 +441,14 @@ class PortfolioDialog(QDialog):
         self._apply_styles()
         self.list_widget.viewport().update()
         self.update()
+
+    def set_wallet_addresses(self, evm_address: str = "", sol_address: str = "") -> None:
+        evm_address = normalize_wallet_address(evm_address)
+        sol_address = normalize_wallet_address(sol_address)
+        self.evm_address_edit.setText(evm_address)
+        self.sol_address_edit.setText(sol_address)
+        self.wallet_addresses_changed.emit(evm_address, sol_address)
+        self._schedule_query()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -475,7 +498,7 @@ class PortfolioDialog(QDialog):
         painter.fillPath(banner_path, banner_grad)
         painter.setFont(QFont("Microsoft YaHei UI", 12, QFont.Weight.Black))
         painter.setPen(self._theme.color("text"))
-        painter.drawText(banner.adjusted(14, 0, -54, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "个人持仓")
+        painter.drawText(banner.adjusted(14, 0, -54, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._title)
 
         header_y = 161
         header_font = QFont("Microsoft YaHei UI", 8, QFont.Weight.Black)
@@ -507,26 +530,28 @@ class PortfolioDialog(QDialog):
         self._drag_origin = None
 
     def _header_specs(self) -> tuple[tuple[str, str, int, int], ...]:
+        content_x = self.list_widget.x()
         if self._is_activity_mode():
             return (
-                ("币种 / 最后活跃", "symbol", 44, 190),
-                ("方向", "side", 276, 56),
-                ("交易金额", "cost_usd", 352, 80),
-                ("数量", "token_amount", 454, 74),
-                ("价格", "price_usd", 554, 74),
-                ("链", "chain", 655, 46),
-                ("时间", "timestamp", 778, 76),
+                ("币种 / 最后活跃", "symbol", content_x + 44, 190),
+                ("方向", "side", content_x + 276, 56),
+                ("交易金额", "cost_usd", content_x + 352, 80),
+                ("数量", "token_amount", content_x + 454, 74),
+                ("价格", "price_usd", content_x + 554, 74),
+                ("链", "chain", content_x + 655, 46),
+                ("时间", "timestamp", content_x + 778, 76),
             )
         return (
-            ("币种 / 最后活跃", "symbol", 44, 190),
-            ("持仓金额", "usd_value", 268, 90),
-            ("未实现", "unrealized_profit", 364, 90),
-            ("已实现", "realized_profit", 460, 90),
-            ("总利润", "total_profit", 556, 90),
-            ("平均买/卖市值", "avg_market_cap", 652, 150),
-            ("持仓时长", "holding_duration_seconds", 808, 80),
-            ("买/卖", "trade_count", 894, 64),
-            ("时间", "last_active_timestamp", 964, 86),
+            ("币种 / 最后活跃", "symbol", content_x + 44, 190),
+            ("持仓金额", "usd_value", content_x + 252, 84),
+            ("未实现", "unrealized_profit", content_x + 344, 84),
+            ("已实现", "realized_profit", content_x + 436, 84),
+            ("总利润", "total_profit", content_x + 528, 84),
+            ("当前市值", "market_cap", content_x + 620, 90),
+            ("平均买/卖市值", "avg_market_cap", content_x + 718, 146),
+            ("持仓时长", "holding_duration_seconds", content_x + 872, 76),
+            ("买/卖", "trade_count", content_x + 956, 58),
+            ("时间", "last_active_timestamp", content_x + 1022, 90),
         )
 
     def _handle_header_click(self, point) -> bool:
@@ -578,6 +603,7 @@ class PortfolioDialog(QDialog):
             "unrealized_profit",
             "realized_profit",
             "total_profit",
+            "market_cap",
             "avg_market_cap",
             "holding_duration_seconds",
             "trade_count",
@@ -705,6 +731,8 @@ class PortfolioDialog(QDialog):
             "unrealized_profit",
             "realized_profit",
             "total_profit",
+            "market_cap",
+            "avg_market_cap",
             "holding_duration_seconds",
             "trade_count",
             "last_active_timestamp",
@@ -727,8 +755,8 @@ class PortfolioDialog(QDialog):
     def _row_size(self, row: dict[str, Any]) -> QSize:
         if str(row.get("row_type") or "") == "trade_drawer":
             activities = row.get("activities") if isinstance(row.get("activities"), list) else []
-            return QSize(1042, max(70, min(446, 40 + len(activities[:20]) * 20)))
-        return QSize(1042, 70)
+            return QSize(1154, max(70, min(446, 40 + len(activities[:20]) * 20)))
+        return QSize(1154, 70)
 
     def _toggle_token_drawer(self, item: QListWidgetItem) -> None:
         row = item.data(Qt.ItemDataRole.UserRole) or {}
@@ -952,6 +980,21 @@ def pnl_color(value: object):
     if number < 0:
         return theme.color("negative")
     return theme.color("text_soft")
+
+
+def position_alert_text(item: dict[str, Any]) -> str:
+    total = to_float(item.get("total_profit"))
+    value = to_float(item.get("usd_value"))
+    if total is not None and value and value > 0:
+        ratio = total / value
+        if ratio >= 0.5:
+            return "止盈"
+        if ratio <= -0.25:
+            return "止损"
+    duration = to_float(item.get("holding_duration_seconds"))
+    if duration is not None and duration >= 7 * 24 * 3600:
+        return "久持"
+    return ""
 
 
 def format_money(value: object, signed: bool = True) -> str:

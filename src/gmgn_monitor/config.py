@@ -382,7 +382,7 @@ def normalize_token(item: dict[str, Any]) -> dict[str, Any]:
     remark = str(item.get("remark") or "").strip()[:28]
     logo_url = str(item.get("logo_url") or "").strip()
     alert_threshold = normalize_alert_threshold(item.get("alert_threshold_percent"))
-    return {
+    token = {
         "chain": chain,
         "address": address,
         "symbol": symbol,
@@ -393,6 +393,10 @@ def normalize_token(item: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(item.get("enabled", True)),
         "pinned": bool(item.get("pinned", False)),
     }
+    for key in ("last_market_cap", "last_price", "last_change_percent", "last_volume_24h", "last_alert_at", "alert_count"):
+        if key in item:
+            token[key] = item.get(key)
+    return token
 
 
 def normalize_alert_threshold(value: Any) -> float | None:
@@ -444,14 +448,38 @@ def normalize_wallet(item: dict[str, Any]) -> dict[str, Any]:
     if not avatar_value:
         avatar_kind = "emoji"
         avatar_value = DEFAULT_WALLET_AVATAR
+    group = str(item.get("group") or item.get("wallet_group") or "").strip()[:18]
+    min_native_amount = normalize_wallet_float(item.get("min_native_amount"), 0.0, 999999.0, 0.0)
+    repeat_seconds = normalize_wallet_int(item.get("repeat_seconds"), 0, 3600, 8)
+    first_buy_only = bool(item.get("first_buy_only", False))
     return {
         "remark": remark or "Wallet",
         "address": address,
         "chain": chain,
         "chains": chains,
+        "group": group or "默认",
+        "min_native_amount": min_native_amount,
+        "repeat_seconds": repeat_seconds,
+        "first_buy_only": first_buy_only,
         "avatar_kind": avatar_kind,
         "avatar_value": avatar_value,
     }
+
+
+def normalize_wallet_float(value: Any, minimum: float, maximum: float, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(number, maximum))
+
+
+def normalize_wallet_int(value: Any, minimum: int, maximum: int, default: int) -> int:
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(number, maximum))
 
 
 def normalize_plain_wallet_address(address: object) -> str:

@@ -165,7 +165,9 @@ class WalletItemDelegate(QStyledItemDelegate):
         remark = wallet.get("remark") or "Wallet"
         chain = str(wallet.get("chain") or "").upper()
         address = wallet.get("address") or ""
+        group = str(wallet.get("group") or "默认").strip()
         sub = f"{chain} {short_address(address)}".strip()
+        group_w = min(52, QFontMetrics(QFont("Microsoft YaHei UI", 7, QFont.Weight.Black)).horizontalAdvance(group) + 14) if group else 0
 
         remark_font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Black)
         sub_font = QFont("Cascadia Mono", 7, QFont.Weight.Bold)
@@ -174,8 +176,16 @@ class WalletItemDelegate(QStyledItemDelegate):
         painter.drawText(
             QRect(text_left, rect.top() + 8, text_width, 17),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            QFontMetrics(remark_font).elidedText(remark, Qt.TextElideMode.ElideRight, text_width),
+            QFontMetrics(remark_font).elidedText(remark, Qt.TextElideMode.ElideRight, max(20, text_width - group_w - 6)),
         )
+        if group:
+            tag = QRect(rect.right() - group_w - 6, rect.top() + 8, group_w, 17)
+            painter.setPen(QPen(theme.color("accent", 78), 1))
+            painter.setBrush(theme.color("accent", 18))
+            painter.drawRoundedRect(tag, 7, 7)
+            painter.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.Black))
+            painter.setPen(theme.color("accent_hover"))
+            painter.drawText(tag, Qt.AlignmentFlag.AlignCenter, QFontMetrics(painter.font()).elidedText(group, Qt.TextElideMode.ElideRight, tag.width() - 6))
         painter.setFont(sub_font)
         painter.setPen(theme.color("text_soft"))
         painter.drawText(
@@ -224,13 +234,14 @@ class KolResultDelegate(QStyledItemDelegate):
 
 class WalletDialog(QDialog):
     wallets_changed = Signal(object)
+    portfolio_requested = Signal(str)
 
     def __init__(self, wallets: list[dict[str, Any]], api_key: str = "", api_host: str = "https://openapi.gmgn.ai", parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("钱包监控")
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self.setFixedSize(600, 396)
+        self.setFixedSize(600, 458)
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.FramelessWindowHint
@@ -258,7 +269,7 @@ class WalletDialog(QDialog):
         self._autosave_timer.timeout.connect(self._emit_wallets_changed)
 
         self.list_widget = QListWidget(self)
-        self.list_widget.setGeometry(28, 146, 274, 158)
+        self.list_widget.setGeometry(28, 146, 274, 220)
         self.list_widget.setItemDelegate(WalletItemDelegate(self.list_widget))
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -282,12 +293,12 @@ class WalletDialog(QDialog):
         self.kol_result_list.hide()
 
         self.add_wallet_button = QPushButton("+", self)
-        self.add_wallet_button.setGeometry(28, 316, 130, 30)
+        self.add_wallet_button.setGeometry(28, 380, 130, 30)
         self.add_wallet_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_wallet_button.clicked.connect(self._new_wallet)
 
         self.remove_wallet_button = QPushButton("-", self)
-        self.remove_wallet_button.setGeometry(172, 316, 130, 30)
+        self.remove_wallet_button.setGeometry(172, 380, 130, 30)
         self.remove_wallet_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.remove_wallet_button.clicked.connect(self._delete_wallet)
 
@@ -302,17 +313,28 @@ class WalletDialog(QDialog):
         self.address_edit.setCursorPosition(0)
         self.address_edit.textEdited.connect(self._on_wallet_field_edited)
 
+        self.group_edit = QLineEdit(self)
+        self.group_edit.setGeometry(326, 239, 246, 34)
+        self.group_edit.setPlaceholderText("分组")
+        self.group_edit.textEdited.connect(self._on_wallet_field_edited)
+
+        self.portfolio_button = QPushButton("查看持仓", self)
+        self.portfolio_button.setGeometry(326, 285, 246, 34)
+        self.portfolio_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.portfolio_button.setEnabled(False)
+        self.portfolio_button.clicked.connect(self._request_portfolio)
+
         self._avatar_kind = "emoji"
         self._avatar_value = DEFAULT_EMOJI
 
         self.avatar_button = QPushButton("钱包图标", self)
         self.avatar_button.setText("钱包图标")
-        self.avatar_button.setGeometry(326, 252, 246, 34)
+        self.avatar_button.setGeometry(326, 332, 246, 34)
         self.avatar_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.avatar_button.clicked.connect(self._open_avatar_picker)
 
         self.cancel_button = QPushButton("关闭", self)
-        self.cancel_button.setGeometry(492, 342, 80, 31)
+        self.cancel_button.setGeometry(492, 404, 80, 31)
         self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_button.clicked.connect(self.accept)
 
@@ -413,6 +435,8 @@ class WalletDialog(QDialog):
         if row < 0 or row >= len(self._wallets):
             self.remark_edit.clear()
             self.address_edit.clear()
+            self.group_edit.clear()
+            self.portfolio_button.setEnabled(False)
             self._set_avatar("emoji", DEFAULT_EMOJI)
             self._loading_wallet = False
             return
@@ -420,6 +444,8 @@ class WalletDialog(QDialog):
         self.remark_edit.setText(wallet.get("remark", ""))
         self.address_edit.setText(wallet.get("address", ""))
         self.address_edit.setCursorPosition(0)
+        self.group_edit.setText(str(wallet.get("group") or "默认"))
+        self.portfolio_button.setEnabled(bool(str(wallet.get("address") or "").strip()))
         kind = wallet.get("avatar_kind", "emoji")
         value = wallet.get("avatar_value") or DEFAULT_EMOJI
         self._set_avatar("image" if kind == "image" else "emoji", value)
@@ -431,6 +457,7 @@ class WalletDialog(QDialog):
             "address": "",
             "chain": "",
             "chains": [],
+            "group": "默认",
             "avatar_kind": "emoji",
             "avatar_value": DEFAULT_EMOJI,
         }
@@ -478,6 +505,10 @@ class WalletDialog(QDialog):
             new_address = new_address.lower()
         wallet["remark"] = self.remark_edit.text().strip() or "Wallet"
         wallet["address"] = new_address
+        wallet["group"] = self.group_edit.text().strip()[:18] or "默认"
+        wallet.pop("min_native_amount", None)
+        wallet.pop("repeat_seconds", None)
+        wallet.pop("first_buy_only", None)
         if new_address != old_address:
             chains = possible_wallet_chains(new_address)
             wallet["chains"] = chains
@@ -487,6 +518,16 @@ class WalletDialog(QDialog):
         item = self.list_widget.item(row)
         if item is not None:
             item.setData(Qt.ItemDataRole.UserRole, dict(wallet))
+        self.portfolio_button.setEnabled(bool(new_address))
+
+    def _request_portfolio(self) -> None:
+        self._sync_current_wallet_preview()
+        row = self._selected_index
+        if row < 0 or row >= len(self._wallets):
+            return
+        address = str(self._wallets[row].get("address") or "").strip()
+        if address:
+            self.portfolio_requested.emit(address)
 
     def _queue_wallets_changed(self) -> None:
         if self._loading_wallet:
@@ -574,6 +615,7 @@ class WalletDialog(QDialog):
                 "address": address,
                 "chain": str(wallet.get("chain") or "").lower().strip(),
                 "chains": [str(wallet.get("chain") or "").lower().strip()] if wallet.get("chain") else [],
+                "group": "KOL",
                 "avatar_kind": avatar_kind,
                 "avatar_value": avatar_value,
             }
@@ -623,6 +665,7 @@ class WalletDialog(QDialog):
         )
         self.remark_edit.setStyleSheet(field_css)
         self.address_edit.setStyleSheet(field_css + 'QLineEdit { font: 600 9px "Cascadia Mono"; }')
+        self.group_edit.setStyleSheet(field_css)
         self.kol_search_edit.setStyleSheet(
             """
             QLineEdit {{
@@ -807,6 +850,7 @@ class WalletDialog(QDialog):
         )
         self.add_wallet_button.setStyleSheet(neutral_button)
         self.remove_wallet_button.setStyleSheet(neutral_button)
+        self.portfolio_button.setStyleSheet(accent_button)
         self.cancel_button.setStyleSheet(neutral_button)
         self.ok_button.setStyleSheet(accent_button)
 
